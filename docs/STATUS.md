@@ -100,6 +100,9 @@ Commit only when the user asks.
 - Offline checks against the installed plugin (`crates/engine/tests/plugin.rs`, skipped without
   one): a note at frame N sounds from N (not from its block start); a released note goes silent;
   the sustain pedal holds and releases.
+- On the user's host (Mint), by hand: the window, the embedded Surge XT editor (works; the bar's
+  menus and tooltips are now below it), velocity on the keys, the metronome with its options
+  window (volume, three sounds), the Linux release build.
 
 ## Not yet verified / known problems
 
@@ -113,18 +116,28 @@ Commit only when the user asks.
 
 ## Next steps, in order
 
-1. Check the embedded editor by hand on the real machine: clicking and dragging in it, typing
-   (keyboard focus), sharpness under fractional scaling, closing. Then Windows (HWND child).
-2. Compare `--midi-timing` modes by ear on the real machine (256-frame blocks under `pw-jack`).
-3. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
+1. **Save settings between starts** (the user's next pick). Today everything resets at each
+   start: the instrument's sound (patch) and its parameters, the tempo, the click's volume and
+   sound, the fingering preview. Plan:
+   - Plugin state: an IBStream MemoryStream; `getState`/`setState` on the component, then
+     `setComponentState` on the controller (and its own `getState`/`setState`). Save on quit,
+     restore after loading.
+   - App settings (chosen plugin, MIDI port if chosen by hand, tempo, click volume and sound,
+     fingering preview, window size) in a small config file in the platform's config folder
+     (`~/.config/onezan/` on Linux, `%APPDATA%` on Windows). The automatic choices stay the
+     default; a saved choice that no longer exists falls back to them.
+2. **Scale trainer basics**: the real fingering table for all scales (hand-written data, both
+   hands), a scale picker in place of the C major preview, the learning order from the planning
+   notes below.
+3. **Windows**: embed the editor in an HWND child window (the stub in `embed.rs`), and run the
+   app there for real (so far only lint/type-checked).
+4. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
    installed, so the first start always makes sound.
-4. **State**: an IBStream MemoryStream; getState/setState on the component; sync the controller
-   with setComponentState after loading; save the chosen plugin and its state to a config file.
 5. Choosing instrument and MIDI port in the window (optional overrides; the automatic choice
-   stays the default).
-6. Later: CLAP via
-   `clack-host`, a built-in SoundFont fallback (`rustysynth`), the scale and fingering data, a
-   learning order, and progress in SQLite (store raw note events).
+   stays the default). The options window is the natural place.
+6. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
+   in the embedded editor; sharpness under fractional scaling (XWayland).
+7. Later: CLAP via `clack-host`, progress in SQLite (store raw note events).
 
 ## Known gaps and shortcuts in the current code
 
