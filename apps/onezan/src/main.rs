@@ -8,11 +8,19 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod fingering;
+mod gui;
+mod keyboard;
+mod session;
+
+use session::{Options, Session};
+
 #[derive(Parser)]
 #[command(version, about = "Play your MIDI keyboard through a VST3 instrument")]
 struct Cli {
+    /// Without a command, the window opens.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 /// `--midi-timing` (the engine's [`MidiTiming`], which knows nothing of clap).
@@ -35,6 +43,16 @@ impl From<Timing> for MidiTiming {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Open the window (the default).
+    Gui {
+        /// Plugin name (substring), class id, or path to a .vst3 bundle. Default: first instrument.
+        plugin: Option<String>,
+        /// MIDI input port (substring of its name). Default: first port that is not a loopback.
+        #[arg(long)]
+        midi: Option<String>,
+        #[arg(long, value_enum, default_value_t = Timing::Auto)]
+        midi_timing: Timing,
+    },
     /// List installed VST3 plugins (instruments only unless --all).
     List {
         #[arg(long)]
@@ -70,11 +88,25 @@ fn main() -> Result<()> {
     unsafe { onezan_engine::request_low_latency() };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     match Cli::parse().cmd {
-        Cmd::List { all } => {
+        None => gui::run(Options {
+            plugin: None,
+            midi: None,
+            timing: MidiTiming::Auto,
+        }),
+        Some(Cmd::Gui {
+            plugin,
+            midi,
+            midi_timing,
+        }) => gui::run(Options {
+            plugin,
+            midi,
+            timing: midi_timing.into(),
+        }),
+        Some(Cmd::List { all }) => {
             list(all);
             Ok(())
         }
-        Cmd::Midi => {
+        Some(Cmd::Midi) => {
             let ports = onezan_engine::midi_input_ports()?;
             if ports.is_empty() {
                 println!("no MIDI input ports");
@@ -84,13 +116,13 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Play {
+        Some(Cmd::Play {
             plugin,
             midi,
             demo,
             midi_timing,
-        } => play(plugin.as_deref(), midi.as_deref(), demo, midi_timing.into()),
-        Cmd::Render { plugin, sample_rate } => render(plugin.as_deref(), sample_rate),
+        }) => play(plugin.as_deref(), midi.as_deref(), demo, midi_timing.into()),
+        Some(Cmd::Render { plugin, sample_rate }) => render(plugin.as_deref(), sample_rate),
     }
 }
 
@@ -245,34 +277,29 @@ fn midi_change(c: &MidiChange) -> String {
 /// C major, one octave up and down, from middle C.
 const SCALE: [u8; 15] = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60];
 
+/// Prints the startup report.
+fn print_report(s: &Session) {
+    for sec in &s.report {
+        report(sec.label, &sec.considered, &sec.detail, sec.hint);
+    }
+    match (&s.first_midi, s.section("MIDI in").is_some()) {
+        (Some(MidiChange::Connected(_)), _) | (_, false) => {}
+        (Some(c), true) => println!("{:<10}  {}", "", midi_change(c)),
+        (None, true) => println!("{:<10}  no keyboard yet: plug one in and it is used", ""),
+    }
+}
+
 fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool, timing: MidiTiming) -> Result<()> {
-    let (mut plugin, plugins) = load(plugin_arg)?;
-    report(
-        "plugin",
-        &plugins,
-        "",
-        "choose another with `onezan play NAME` (see `onezan list`)",
-    );
-    let (midi_tx, midi_rx) = midi_queue();
+    let opts = Options {
+        plugin: plugin_arg.map(String::from),
+        midi: midi_arg.map(String::from),
+        timing,
+    };
     let (demo_tx, demo_rx) = midi_queue();
-
-    let (watch, first, ports) =
-        onezan_engine::MidiWatch::start(midi_arg.map(String::from), onezan_engine::midi_in::POLL, midi_tx, |c| {
-            println!("{:<10}{}", "MIDI in", midi_change(&c));
-        })?;
-    report("MIDI in", &ports, "", "choose another with --midi NAME");
-    match (first, midi_arg) {
-        (Some(MidiChange::Connected(_)), _) => {}
-        (Some(c), _) => println!("{:<10}  {}", "", midi_change(&c)),
-        (None, Some(q)) => println!("{:<10}  no port matches {q:?} yet: it is used once it appears", ""),
-        (None, None) => println!("{:<10}  no keyboard yet: plug one in and it is used", ""),
-    }
-
-    let audio = AudioOut::start(&mut plugin, vec![midi_rx, demo_rx], timing)?;
-    report("audio out", &audio.considered, &audio_detail(&audio), "");
-    if let Some(t) = audio.midi_timing() {
-        report("timing", &t, "", "choose with --midi-timing exact|immediate|auto");
-    }
+    let session = Session::start(&opts, vec![demo_rx], std::sync::Arc::default(), |c| {
+        println!("{:<10}{}", "MIDI in", midi_change(&c));
+    })?;
+    print_report(&session);
 
     let demo_thread = demo.then(|| std::thread::spawn(move || play_scale(demo_tx)));
     if let Some(t) = demo_thread {
@@ -283,10 +310,7 @@ fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool, timing: Mi
         // No terminal (stdin closed): let the demo's last note ring out.
         std::thread::sleep(Duration::from_millis(1500));
     }
-    // The MIDI input first, then the stream (and with it the plugin's processor), then the plugin.
-    drop(watch);
-    audio.stop();
-    plugin.stop();
+    session.stop();
     Ok(())
 }
 

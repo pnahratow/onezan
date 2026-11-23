@@ -45,7 +45,7 @@ mod tests {
         let (tx, mut rx) = midi_queue();
         let changes = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&changes);
-        let (watch, first, _) = MidiWatch::start(Some(PORT.into()), POLL, tx, move |c| {
+        let (watch, first, _) = MidiWatch::start(Some(PORT.into()), POLL, tx, Arc::default(), move |c| {
             log.lock().unwrap().push(c);
         })
         .unwrap();

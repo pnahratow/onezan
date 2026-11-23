@@ -10,8 +10,9 @@ use crate::{Considered, choose_midi_port};
 use anyhow::Result;
 use onezan_vst3_host::MidiEvent;
 use rtrb::Producer;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -32,6 +33,82 @@ pub enum MidiChange {
     },
 }
 
+/// The keys the keyboard holds right now (all channels merged), and the sustain pedal: for
+/// display. Written by the MIDI thread, read by anyone.
+#[derive(Default)]
+pub struct Keys {
+    held: [AtomicU64; 2],
+    sustain: AtomicBool,
+    waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl Keys {
+    /// Whether `key` (a MIDI note number) is held down.
+    #[must_use]
+    pub fn held(&self, key: u8) -> bool {
+        let (word, bit) = key_bit(key);
+        self.held
+            .get(word)
+            .is_some_and(|w| w.load(Ordering::Relaxed) & bit != 0)
+    }
+
+    /// Whether the sustain pedal is down.
+    #[must_use]
+    pub fn sustain(&self) -> bool {
+        self.sustain.load(Ordering::Relaxed)
+    }
+
+    /// Sets what runs after every change, on the MIDI thread (for example, a GUI repaint
+    /// request). Only the first call counts.
+    pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
+        let _ = self.waker.set(Box::new(waker));
+    }
+
+    fn update(&self, ev: MidiEvent) {
+        let set = |key: u8, down: bool| {
+            let (word, bit) = key_bit(key);
+            if let Some(w) = self.held.get(word) {
+                if down {
+                    w.fetch_or(bit, Ordering::Relaxed);
+                } else {
+                    w.fetch_and(!bit, Ordering::Relaxed);
+                }
+            }
+        };
+        match ev {
+            MidiEvent::NoteOn { key, .. } => set(key, true),
+            MidiEvent::NoteOff { key, .. } => set(key, false),
+            MidiEvent::ControlChange {
+                controller: 64, value, ..
+            } => self.sustain.store(value >= 64, Ordering::Relaxed),
+            _ => return,
+        }
+        self.wake();
+    }
+
+    fn clear(&self) {
+        for w in &self.held {
+            w.store(0, Ordering::Relaxed);
+        }
+        self.sustain.store(false, Ordering::Relaxed);
+        self.wake();
+    }
+
+    fn wake(&self) {
+        if let Some(w) = self.waker.get() {
+            w();
+        }
+    }
+}
+
+/// The word and bit of `key` in [`Keys::held`].
+fn key_bit(key: u8) -> (usize, u64) {
+    (
+        usize::from(key / 64),
+        1u64.checked_shl(u32::from(key % 64)).unwrap_or(0),
+    )
+}
+
 /// Watches the MIDI ports and keeps one open; stops when dropped.
 pub struct MidiWatch {
     stop: Option<mpsc::Sender<()>>,
@@ -40,7 +117,7 @@ pub struct MidiWatch {
 
 impl MidiWatch {
     /// Opens the port [`choose_midi_port`] picks for `query`, if there is one, and keeps watching
-    /// every `poll`. Events go to `tx`. `on_change` runs on the watcher thread for every later
+    /// every `poll`. Events go to `tx`, and what is held is kept in `keys`. `on_change` runs on the watcher thread for every later
     /// change.
     ///
     /// Returns the watcher, the result of the first attempt (`None`: no port fits yet) and the
@@ -53,12 +130,13 @@ impl MidiWatch {
         query: Option<String>,
         poll: Duration,
         tx: Producer<TimedEvent>,
+        keys: Arc<Keys>,
         mut on_change: impl FnMut(MidiChange) + Send + 'static,
     ) -> Result<(Self, Option<MidiChange>, Vec<Considered>)> {
         let mut watcher = Watcher {
             list: midir::MidiInput::new("onezan")?,
             query,
-            feed: Arc::new(Mutex::new(Feed::new(tx))),
+            feed: Arc::new(Mutex::new(Feed::new(tx, keys))),
             open: None,
             last_error: None,
         };
@@ -191,14 +269,16 @@ struct Feed {
     held: [u128; 16],
     /// A bit per channel that saw any event.
     used: u16,
+    keys: Arc<Keys>,
 }
 
 impl Feed {
-    const fn new(tx: Producer<TimedEvent>) -> Self {
+    const fn new(tx: Producer<TimedEvent>, keys: Arc<Keys>) -> Self {
         Self {
             tx,
             held: [0; 16],
             used: 0,
+            keys,
         }
     }
 
@@ -219,6 +299,7 @@ impl Feed {
         self.used |= 1u16.checked_shl(u32::from(channel_of(ev))).unwrap_or(0);
         // A full queue drops the event; the audio thread is not keeping up anyway.
         let _ = self.tx.push(TimedEvent::now(ev));
+        self.keys.update(ev);
     }
 
     /// Note-offs for every held key; sustain, mod wheel and pitch bend back to rest.
@@ -247,6 +328,7 @@ impl Feed {
         }
         self.held = [0; 16];
         self.used = 0;
+        self.keys.clear();
     }
 }
 
@@ -276,7 +358,8 @@ mod tests {
     #[test]
     fn release_all_frees_held_notes_and_controllers() {
         let (tx, mut rx) = crate::midi_queue();
-        let mut feed = Feed::new(tx);
+        let keys = Arc::new(Keys::default());
+        let mut feed = Feed::new(tx, Arc::clone(&keys));
         let on = |key| MidiEvent::NoteOn {
             channel: 2,
             key,
@@ -291,7 +374,9 @@ mod tests {
             velocity: 64,
         });
         drain(&mut rx);
+        assert!(keys.held(60) && keys.held(127) && !keys.held(64));
         feed.release_all();
+        assert!(!keys.held(60) && !keys.held(127));
         let off = |key| MidiEvent::NoteOff {
             channel: 2,
             key,

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-pub use midi_in::{MidiChange, MidiWatch};
+pub use midi_in::{Keys, MidiChange, MidiWatch};
 pub use rtrb::{Consumer, Producer, RingBuffer};
 pub use timing::{MidiTiming, TimedEvent};
 
@@ -347,15 +347,21 @@ impl AudioOut {
         })
     }
 
+    /// The MIDI timing in use (exact or immediate), once the audio callback has run.
+    #[must_use]
+    pub fn timing_mode(&self) -> Option<MidiTiming> {
+        match self.applied.load(Ordering::Relaxed) {
+            APPLIED_EXACT => Some(MidiTiming::Exact),
+            APPLIED_IMMEDIATE => Some(MidiTiming::Immediate),
+            _ => None,
+        }
+    }
+
     /// The MIDI timing report: the setting, what it resolved to for the current block, why, and
     /// the alternative. Call after [`AudioOut::block_frames`] has returned a size.
     #[must_use]
     pub fn midi_timing(&self) -> Option<Vec<Considered>> {
-        let applied = match self.applied.load(Ordering::Relaxed) {
-            APPLIED_EXACT => MidiTiming::Exact,
-            APPLIED_IMMEDIATE => MidiTiming::Immediate,
-            _ => return None,
-        };
+        let applied = self.timing_mode()?;
         let frames = usize::try_from(self.block.load(Ordering::Relaxed)).ok()?;
         let block = timing::block_duration(frames, self.sample_rate);
         Some(timing::timing_considered(self.timing, applied, block))

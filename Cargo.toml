@@ -20,6 +20,9 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
+# OpenGL (glow) rather than wgpu: lighter, and works on any GL driver.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
 
 # Strict lints, from https://www.namtao.com/rust/ ("Strict lints"). Test code is exempted from
 # the panic lints in clippy.toml.

@@ -60,7 +60,12 @@ crates/vst3-host/       onezan-vst3-host: the VST3 host
   scan.rs               default_search_paths ($VST3_PATH, ~/.vst3, /usr/lib/vst3, ...), find_bundles, scan
 crates/engine/          onezan-engine: midir input -> rtrb queues -> cpal output callback
                         (asks for a 256-frame buffer, f32); render_offline
-apps/onezan/            CLI: list [--all] | midi | play [PLUGIN] [--midi PORT] [--demo] | render [PLUGIN]
+apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | midi |
+                        play [PLUGIN] [--midi PORT] [--demo] | render [PLUGIN]
+  session.rs            plugin + MIDI watcher + audio, with the startup report (play and the window)
+  gui.rs                the window (egui/eframe, OpenGL): top bar, instrument area, keyboard
+  keyboard.rs           the on-screen keyboard widget, with fingering badges
+  fingering.rs          fingering preview (only C major for now)
 README.md, LICENSE (GPL-3.0), .gitignore
 ```
 
@@ -90,20 +95,19 @@ Commit only when the user asks.
 
 ## Next steps, in order
 
-1. Check reconnect by hand: unplug and replug the keyboard during `play`, also while holding a
-   note; start without a keyboard and plug it in.
+1. **Plugin editor in the window's middle area**: IPlugView attached to a child window, and the
+   Linux IRunLoop (the plugin's timers and file descriptors serviced on the UI thread). Linux needs
+   an X11 parent, so the window must run on X11 (XWayland under Hyprland; winit can be told to);
+   Windows needs an HWND. transit's `view.rs` and `run_loop.rs` are the reference. The window
+   should size itself to the editor.
 2. Compare `--midi-timing` modes by ear on the real machine (256-frame blocks under `pw-jack`).
 3. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
    installed, so the first start always makes sound.
-4. **Plugin editor window** (so the user can pick sounds): IPlugView, IPlugFrame, and IRunLoop
-   on Linux (the plugin's timers and file descriptors must be serviced on the UI thread).
-   Linux needs an X11 window, which runs under XWayland on Hyprland. Windows needs an HWND.
-   transit's `view.rs` and `run_loop.rs` are the reference.
-5. **State**: an IBStream MemoryStream; getState/setState on the component; sync the controller
+4. **State**: an IBStream MemoryStream; getState/setState on the component; sync the controller
    with setComponentState after loading; save the chosen plugin and its state to a config file.
-6. A GUI (egui is the likely choice) with an on-screen keyboard showing the keys being played.
-   This leads into the scale trainer.
-7. Later: a metronome (generated inside the audio callback, sample-accurate), CLAP via
+5. Choosing instrument and MIDI port in the window (optional overrides; the automatic choice
+   stays the default).
+6. Later: a metronome (generated inside the audio callback, sample-accurate), CLAP via
    `clack-host`, a built-in SoundFont fallback (`rustysynth`), the scale and fingering data, a
    learning order, and progress in SQLite (store raw note events).
 
@@ -182,6 +186,34 @@ the one `choose_midi_port` picks (so `--midi` applies to later keyboards too). `
 exits without a keyboard: it says to plug one in, and prints each connect and unplug. A failing
 port is retried every poll and reported once. A replug within one poll that gets the same ALSA
 port address back would go unnoticed.
+
+## The window (2026-11-23)
+
+`onezan` without a command opens it (`onezan gui [PLUGIN] [--midi PORT] [--midi-timing ...]` for
+overrides). egui 0.36 through eframe with the OpenGL (glow) backend, not wgpu: lighter, and
+works on any GL driver (the VM has only llvmpipe).
+
+- **Top bar**: instrument, MIDI port (green dot when connected; "plug in a keyboard" otherwise;
+  live), "pedal" while sustain is down, audio backend and block length, timing mode. Hovering an
+  item shows the startup report for it (what was chosen, why, the alternatives). On the right,
+  the fingering picker. When the window is narrow the left part is cut off, not overlapped.
+- **Middle**: placeholder for the plugin's editor (next step).
+- **Keyboard**: 49 keys, C2 to C6, by default. Reasons: the most common small keyboard size (the
+  user's), and exactly two octaves per hand for scales hands together, left hand C2 to C4 and
+  right hand C4 to C6, meeting on middle C. A played key outside the range widens it by whole
+  octaves, so nothing played is invisible. MIDI cannot tell the keyboard's size, so this is the
+  only way to adapt.
+- **Key design** (`keyboard.rs`), in layers: key (white or black); state (in the scale: light
+  tint; pressed: blue); up to two fingering badges, numbered circles, right hand blue and left
+  hand orange. Badges sit where the finger lands: the front of a white key below the black keys,
+  the lower end of a black key. When both hands use one key, the left badge is above the right.
+  C keys are labelled with their octave (C4 = middle C).
+- Held keys come from the engine: `onezan_engine::Keys` (atomic bitsets, all channels merged, and
+  the sustain pedal), written by the MIDI thread, which also wakes the window to repaint.
+- Fingering preview: only "C major, both hands" so far (`fingering.rs`), to show the badges. The
+  real scale table replaces it.
+- Checked in the VM with screenshots (`grim`), with notes sent through the Midi Through port
+  (`onezan gui --midi through` plus `aseqsend -p 14:0 90 3C 64`).
 
 ## Lints (2026-11-23)
 
