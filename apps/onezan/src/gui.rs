@@ -14,7 +14,7 @@ use crate::settings::{MetronomeSettings, Settings, Store};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
-use onezan_engine::{Click, Keys, Metronome, MidiChange, Verdict};
+use onezan_engine::{Click, Keys, Metronome, MidiChange, MidiTiming, Output, Verdict};
 use onezan_vst3_host::Editor;
 use onezan_vst3_host::PluginInfo;
 use std::cell::RefCell;
@@ -48,6 +48,8 @@ pub fn run(mut opts: Options) -> Result<()> {
     opts.remembered = Remembered {
         plugin: settings.instrument.clone(),
         midi: settings.midi.clone(),
+        output: settings.audio.clone().map(Into::into),
+        timing: settings.midi_timing.as_deref().and_then(MidiTiming::from_name),
     };
     let size = settings
         .window
@@ -102,6 +104,22 @@ struct OpenWindows {
     instruments: bool,
 }
 
+/// A choice made in one of the bar's menus, applied after the bar is drawn.
+enum Pick {
+    /// The MIDI port (a query for [`Session::choose_midi`]); `None`: the automatic choice.
+    Midi(Option<String>),
+    /// The audio output; `None`: the automatic choice.
+    Output(Option<Output>),
+    Timing(MidiTiming),
+}
+
+/// What the bar's menus list, read when a menu opens (listing audio outputs takes a moment).
+#[derive(Default)]
+struct MenuLists {
+    ports: Option<Vec<String>>,
+    outputs: Option<Vec<Output>>,
+}
+
 /// The MIDI keyboard as the bar shows it.
 #[derive(Clone)]
 enum MidiState {
@@ -132,6 +150,9 @@ struct App {
     instruments: Option<Vec<PluginInfo>>,
     /// Why the last switch of instrument did not work.
     instrument_note: Option<String>,
+    /// Why the last audio output chosen did not work.
+    audio_note: Option<String>,
+    menus: MenuLists,
     /// What the app was started with; a switch of instrument starts again from it.
     opts: Options,
     scale_order: ScaleOrder,
@@ -201,6 +222,8 @@ impl App {
             open: OpenWindows::default(),
             instruments: None,
             instrument_note: None,
+            audio_note: None,
+            menus: MenuLists::default(),
             opts: opts.clone(),
             scale_order: ScaleOrder::Learning,
             recorder,
@@ -233,7 +256,18 @@ impl App {
             MidiState::Connected(p) => Some(port_name(p).to_owned()),
             _ => self.saved.midi.clone(),
         };
+        let (audio, midi_timing) = self.session.as_ref().map_or_else(
+            || (self.saved.audio.clone(), self.saved.midi_timing.clone()),
+            |s| {
+                (
+                    s.chosen_output().cloned().map(Into::into),
+                    s.timing().map(|t| t.name().to_owned()),
+                )
+            },
+        );
         Settings {
+            audio,
+            midi_timing,
             metronome,
             scale: (self.preview != Preview::Off).then(|| self.preview.name()),
             window: self.window_size,
@@ -267,6 +301,8 @@ impl App {
 
     fn bar(&mut self, ui: &mut egui::Ui) {
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, self.preview);
+        let (lists, audio_note) = (&mut self.menus, self.audio_note.as_deref());
+        let mut pick = None;
         let (options, scales, instruments) = (
             &mut self.open.options,
             &mut self.open.scales,
@@ -293,7 +329,23 @@ impl App {
                     MidiState::Waiting => ("plug in a keyboard".to_string(), Color32::GRAY),
                     MidiState::Failed(e) => (e.clone(), Color32::from_rgb(239, 68, 68)),
                 };
-                item(ui, "MIDI", &shorten(&text), Some(dot), section("MIDI in"));
+                let connected = match &midi {
+                    MidiState::Connected(p) => Some(p.as_str()),
+                    _ => None,
+                };
+                let r = menu_item(ui, "MIDI", &shorten(&text), Some(dot), section("MIDI in"));
+                let shown = egui::Popup::menu(&r)
+                    .align(egui::RectAlign::BOTTOM_START)
+                    .align_alternatives(&[egui::RectAlign::BOTTOM_END])
+                    .show(|ui| {
+                        let ports = lists
+                            .ports
+                            .get_or_insert_with(|| onezan_engine::midi_input_ports().unwrap_or_default());
+                        midi_menu(ui, ports, connected, session.and_then(Session::chosen_midi), &mut pick);
+                    });
+                if shown.is_none() {
+                    lists.ports = None;
+                }
                 // Always there, lit while the pedal is down: the layout does not move.
                 let pedal = if keys.sustain() {
                     Color32::from_rgb(251, 191, 36)
@@ -301,9 +353,23 @@ impl App {
                     Color32::from_gray(70)
                 };
                 item(ui, "Pedal", "", Some(pedal), None);
-                item(ui, "Audio", short("audio out"), None, section("audio out"));
-                if section("timing").is_some() {
-                    item(ui, "Timing", short("timing"), None, section("timing"));
+                if let Some(s) = session {
+                    let r = menu_item(ui, "Audio", short("audio out"), None, section("audio out"));
+                    let shown = egui::Popup::menu(&r)
+                        .align(egui::RectAlign::BOTTOM_START)
+                        .align_alternatives(&[egui::RectAlign::BOTTOM_END])
+                        .show(|ui| {
+                            let outputs = lists.outputs.get_or_insert_with(onezan_engine::audio_outputs);
+                            output_menu(ui, outputs, s, audio_note, &mut pick);
+                        });
+                    if shown.is_none() {
+                        lists.outputs = None;
+                    }
+                    let r = menu_item(ui, "Timing", short("timing"), None, section("timing"));
+                    egui::Popup::menu(&r)
+                        .align(egui::RectAlign::BOTTOM_START)
+                        .align_alternatives(&[egui::RectAlign::BOTTOM_END])
+                        .show(|ui| timing_menu(ui, s.timing(), &mut pick));
                 }
             },
             |ui| {
@@ -317,6 +383,27 @@ impl App {
                 }
             },
         );
+        if let Some(p) = pick {
+            self.apply(p);
+        }
+    }
+
+    /// Applies a choice from the bar's menus.
+    fn apply(&mut self, pick: Pick) {
+        let Some(s) = self.session.as_mut() else { return };
+        match pick {
+            Pick::Midi(query) => s.choose_midi(query),
+            Pick::Timing(t) => s.set_timing(t),
+            Pick::Output(o) => {
+                self.audio_note = s.set_output(o.as_ref()).err().map(|e| {
+                    let name = o
+                        .as_ref()
+                        .map_or_else(|| "the automatic choice".to_owned(), Output::label);
+                    format!("{name} did not work ({e:#}); playing through the automatic choice")
+                });
+                crate::report::print_report(s);
+            }
+        }
     }
 
     /// The options, in a window of their own: the plugin's editor covers anything drawn over
@@ -359,6 +446,7 @@ impl App {
     fn switch_instrument(&mut self, ctx: &egui::Context, class_id: &str) {
         let now = self.settings();
         let ticking = self.session.as_ref().is_some_and(|s| s.metronome().is_on());
+        let chosen_midi = self.session.as_ref().and_then(|s| s.chosen_midi().map(str::to_owned));
         let previous = self.session.as_ref().map(|s| s.plugin().class_id().to_owned());
         // In this order: the editor leaves its window, then the plugin goes.
         drop(self.embedded.borrow_mut().take());
@@ -370,8 +458,11 @@ impl App {
         let mut opts = self.opts.clone();
         opts.plugin = Some(class_id.to_owned());
         opts.metronome = None;
-        // The keyboard in use now, if any (else the usual choice).
+        // The keyboard in use now, if any (else the usual choice); the output and timing in use.
         opts.remembered.midi.clone_from(&now.midi);
+        opts.remembered.output = now.audio.clone().map(Into::into);
+        opts.remembered.timing = now.midi_timing.as_deref().and_then(MidiTiming::from_name);
+        opts.midi = chosen_midi;
         let session = match start_session(ctx, &opts, &self.keys, &self.midi) {
             Ok(s) => {
                 self.instrument_note = None;
@@ -886,6 +977,105 @@ fn item(ui: &mut egui::Ui, label: &str, value: &str, dot: Option<Color32>, why: 
     ui.separator();
 }
 
+/// One item of the bar that opens a menu: "Label ● value" with the value as a button, the
+/// report's reasons on hover. Returns the button's response, for the menu.
+fn menu_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    dot: Option<Color32>,
+    why: Option<&Section>,
+) -> egui::Response {
+    ui.label(RichText::new(label).weak());
+    if let Some(c) = dot {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.0, c);
+    }
+    let text = if value.is_empty() { "…" } else { value };
+    let r = ui.button(format!("{text} ⏷"));
+    let r = match why {
+        Some(s) => r.on_hover_text(format!("Click to choose.\n\n{}", explain(s))),
+        None => r.on_hover_text("Click to choose."),
+    };
+    ui.separator();
+    r
+}
+
+/// The highest a menu of the bar gets before it scrolls: it opens over the keyboard, below the
+/// plugin's editor (which would cover it).
+const MENU_HEIGHT: f32 = 170.0;
+
+/// The MIDI menu: automatic, or one of `ports`.
+fn midi_menu(
+    ui: &mut egui::Ui,
+    ports: &[String],
+    connected: Option<&str>,
+    chosen: Option<&str>,
+    pick: &mut Option<Pick>,
+) {
+    if ui
+        .selectable_label(chosen.is_none(), "Automatic: the first keyboard found")
+        .clicked()
+    {
+        *pick = Some(Pick::Midi(None));
+    }
+    ui.separator();
+    if ports.is_empty() {
+        ui.label(RichText::new("No MIDI inputs: plug in a keyboard").weak());
+    }
+    egui::ScrollArea::vertical().max_height(MENU_HEIGHT).show(ui, |ui| {
+        for p in ports {
+            if ui.selectable_label(connected == Some(p.as_str()), p).clicked() {
+                *pick = Some(Pick::Midi(Some(port_name(p).to_owned())));
+            }
+        }
+    });
+}
+
+/// The audio menu: automatic, or one of `outputs`, grouped by audio system.
+fn output_menu(ui: &mut egui::Ui, outputs: &[Output], session: &Session, note: Option<&str>, pick: &mut Option<Pick>) {
+    if let Some(n) = note {
+        ui.label(RichText::new(n).color(Color32::from_rgb(239, 68, 68)));
+        ui.separator();
+    }
+    let chosen = session.chosen_output();
+    if ui
+        .selectable_label(chosen.is_none(), "Automatic: the lowest latency this system offers")
+        .clicked()
+    {
+        *pick = Some(Pick::Output(None));
+    }
+    ui.separator();
+    // Under the automatic choice too: it shows what was picked.
+    let in_use = session.output();
+    egui::ScrollArea::vertical().max_height(MENU_HEIGHT).show(ui, |ui| {
+        let mut backend = "";
+        for o in outputs {
+            if o.backend != backend {
+                backend = &o.backend;
+                ui.label(RichText::new(backend).weak());
+            }
+            if ui.selectable_label(in_use.as_ref() == Some(o), &o.device).clicked() {
+                *pick = Some(Pick::Output(Some(o.clone())));
+            }
+        }
+    });
+}
+
+/// The MIDI timing menu, each mode with what it does.
+fn timing_menu(ui: &mut egui::Ui, now: Option<MidiTiming>, pick: &mut Option<Pick>) {
+    for t in MidiTiming::ALL {
+        let what = match t {
+            MidiTiming::Auto => "Auto: exact when blocks are short, else immediate",
+            MidiTiming::Exact => "Exact: notes keep their spacing, one block later",
+            MidiTiming::Immediate => "Immediate: no extra delay, but uneven",
+        };
+        if ui.selectable_label(now == Some(t), what).clicked() {
+            *pick = Some(Pick::Timing(t));
+        }
+    }
+}
+
 /// The report section as hover text: what is used and why, and the alternatives.
 fn explain(s: &Section) -> String {
     let lines = s.considered.iter().map(|c| match c.verdict {
@@ -964,7 +1154,7 @@ impl Drop for App {
     }
 }
 
-/// The window's native id, for the editor's parent: the X11 window on Linux.
+/// The window's native id, for the editor's parent: the X11 window on Linux, the `HWND` on Windows.
 fn window_id(frame: &eframe::Frame) -> Result<u64, String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let handle = frame.window_handle().map_err(|e| format!("no window handle: {e}"))?;
@@ -972,7 +1162,8 @@ fn window_id(frame: &eframe::Frame) -> Result<u64, String> {
         #[allow(clippy::useless_conversion, reason = "c_ulong is u32 on 32-bit systems")]
         RawWindowHandle::Xlib(h) => Ok(u64::from(h.window)),
         RawWindowHandle::Xcb(h) => Ok(u64::from(h.window.get())),
-        _ => Err("the window is not an X11 window".into()),
+        RawWindowHandle::Win32(h) => u64::try_from(h.hwnd.get()).map_err(|_| "bad window handle".into()),
+        _ => Err("the window is not an X11 or Win32 window".into()),
     }
 }
 

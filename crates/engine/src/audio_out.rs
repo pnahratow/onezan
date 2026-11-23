@@ -1,17 +1,17 @@
 //! The audio output: picks the backend with the lowest latency the system offers (JACK, else the
-//! platform default), opens the stream and reports the choice.
+//! platform default), or the one chosen by hand; opens the stream and reports the choice.
 
 use crate::MAX_FRAMES;
-use crate::callback::{APPLIED_EXACT, APPLIED_IMMEDIATE, Callback, Report};
+use crate::callback::{Callback, Report};
 use crate::metronome::Metronome;
 use crate::report::{Considered, Verdict};
-use crate::timing::{self, MidiTiming, TimedEvent};
+use crate::timing::{self, MidiTiming, SharedTiming, TimedEvent};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use onezan_vst3_host::Plugin;
 use rtrb::Consumer;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// The block size asked of PipeWire, in frames at 48 kHz (5.3 ms). PipeWire grants it, or the
@@ -35,6 +35,78 @@ pub unsafe fn request_low_latency() {
     }
 }
 
+/// An output that can be chosen by hand: an audio system ("JACK", "ALSA", "WASAPI") and one of
+/// its devices, by name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Output {
+    pub backend: String,
+    pub device: String,
+}
+
+impl Output {
+    /// "ALSA: default".
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("{}: {}", self.backend, self.device)
+    }
+}
+
+/// What JACK's one output is called. cpal names JACK "devices" after our own client
+/// (`cpal_client_out-62`, different every run), so they are not listed by name.
+const JACK_DEVICE: &str = "default";
+
+/// The output devices of `host` that can be chosen, with their names.
+fn devices(host: &cpal::Host) -> Vec<(String, cpal::Device)> {
+    if is_jack(host.id()) {
+        return host
+            .default_output_device()
+            .map(|d| (JACK_DEVICE.to_owned(), d))
+            .into_iter()
+            .collect();
+    }
+    host.output_devices()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.name().ok().map(|n| (n, d)))
+        .collect()
+}
+
+/// Every output device of every audio system available here, to choose from. Can take a moment
+/// (ALSA looks at each device).
+#[must_use]
+pub fn audio_outputs() -> Vec<Output> {
+    cpal::available_hosts()
+        .into_iter()
+        .filter_map(|id| cpal::host_from_id(id).ok())
+        .flat_map(|host| {
+            let backend = host.id().name().to_string();
+            devices(&host).into_iter().map(move |(device, _)| Output {
+                backend: backend.clone(),
+                device,
+            })
+        })
+        .collect()
+}
+
+/// The output `wanted`, chosen by hand.
+fn find_output(wanted: &Output) -> Result<(cpal::HostId, cpal::Device, Vec<Considered>)> {
+    let id = cpal::available_hosts()
+        .into_iter()
+        .find(|h| h.name() == wanted.backend)
+        .with_context(|| format!("{} is not available here", wanted.backend))?;
+    let host = cpal::host_from_id(id).with_context(|| format!("{} is not available", wanted.backend))?;
+    let (_, device) = devices(&host)
+        .into_iter()
+        .find(|(name, _)| *name == wanted.device)
+        .with_context(|| format!("{} is not there", wanted.label()))?;
+    let considered = vec![Considered::new(
+        wanted.label(),
+        Verdict::Used,
+        "chosen by hand (\"Automatic\" picks the lowest latency the system offers)",
+    )];
+    Ok((id, device, considered))
+}
+
 /// A running audio stream that plays the plugin. Dropping it stops the sound; drop it before
 /// the [`Plugin`].
 pub struct AudioOut {
@@ -52,9 +124,10 @@ pub struct AudioOut {
     pub considered: Vec<Considered>,
     /// Frames in the latest audio callback, 0 until [`SETTLE_CALLBACKS`] have run.
     block: Arc<AtomicU32>,
-    /// The MIDI timing setting, and the mode it resolved to in the latest callback.
-    timing: MidiTiming,
-    applied: Arc<AtomicU8>,
+    /// Whether it is JACK (its one output is listed as [`JACK_DEVICE`]).
+    jack: bool,
+    /// The MIDI timing setting, shared with the callback.
+    timing: Arc<SharedTiming>,
     stream: cpal::Stream,
 }
 
@@ -184,21 +257,22 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 }
 
 impl AudioOut {
-    /// Opens the best output (see [`pick_output`]), starts `plugin` at its sample rate and plays
+    /// Opens `output`, or without one the best output (see [`pick_output`]); starts `plugin` at its sample rate and plays
     /// it, feeding it the events from `inputs`, placed in each block as `timing` says, with the
     /// clicks of `metronome` mixed in.
     ///
     /// # Errors
     ///
-    /// When there is no usable output device (32-bit float), the plugin cannot start, or the
-    /// stream cannot be opened.
+    /// When there is no usable output device (32-bit float), the one asked for is not there, the
+    /// plugin cannot start, or the stream cannot be opened.
     pub fn start(
         plugin: &mut Plugin,
         inputs: Vec<Consumer<TimedEvent>>,
         timing: MidiTiming,
         metronome: Arc<Metronome>,
+        output: Option<&Output>,
     ) -> Result<Self> {
-        let (host_id, device, considered) = pick_output()?;
+        let (host_id, device, considered) = output.map_or_else(pick_output, find_output)?;
         let device_name = device.name().unwrap_or_else(|_| "unknown device".into());
         let supported = pick_config(&device)?;
         let sample_rate = supported.sample_rate();
@@ -214,12 +288,17 @@ impl AudioOut {
 
         let processor = plugin.start(f64::from(sample_rate.0), MAX_FRAMES)?;
         let block = Arc::new(AtomicU32::new(0));
-        let applied = Arc::new(AtomicU8::new(0));
-        let report = Report {
-            block: block.clone(),
-            applied: applied.clone(),
-        };
-        let mut cb = Callback::new(processor, inputs, channels, sample_rate.0, timing, report, metronome);
+        let report = Report { block: block.clone() };
+        let timing = Arc::new(SharedTiming::new(timing));
+        let mut cb = Callback::new(
+            processor,
+            inputs,
+            channels,
+            sample_rate.0,
+            Arc::clone(&timing),
+            report,
+            metronome,
+        );
         let stream = device
             .build_output_stream(
                 &config,
@@ -246,20 +325,41 @@ impl AudioOut {
             sample_rate: sample_rate.0,
             buffer_frames,
             block,
+            jack: is_jack(host_id),
             timing,
-            applied,
             stream,
         })
     }
 
-    /// The MIDI timing in use (exact or immediate), once the audio callback has run.
+    /// The output in use, as [`audio_outputs`] lists it.
+    #[must_use]
+    pub fn output(&self) -> Output {
+        Output {
+            backend: self.backend.clone(),
+            device: if self.jack {
+                JACK_DEVICE.to_owned()
+            } else {
+                self.device_name.clone()
+            },
+        }
+    }
+
+    /// The MIDI timing setting.
+    #[must_use]
+    pub fn timing(&self) -> MidiTiming {
+        self.timing.get()
+    }
+
+    /// Changes the MIDI timing setting; the next audio block uses it.
+    pub fn set_timing(&self, t: MidiTiming) {
+        self.timing.set(t);
+    }
+
+    /// The MIDI timing in use (exact or immediate), once the block size has settled.
     #[must_use]
     pub fn timing_mode(&self) -> Option<MidiTiming> {
-        match self.applied.load(Ordering::Relaxed) {
-            APPLIED_EXACT => Some(MidiTiming::Exact),
-            APPLIED_IMMEDIATE => Some(MidiTiming::Immediate),
-            _ => None,
-        }
+        let frames = usize::try_from(self.block.load(Ordering::Relaxed)).ok()?;
+        (frames > 0).then(|| self.timing().resolve(frames, self.sample_rate))
     }
 
     /// The MIDI timing report: the setting, what it resolved to for the current block, why, and
@@ -269,7 +369,7 @@ impl AudioOut {
         let applied = self.timing_mode()?;
         let frames = usize::try_from(self.block.load(Ordering::Relaxed)).ok()?;
         let block = timing::block_duration(frames, self.sample_rate);
-        Some(timing::timing_considered(self.timing, applied, block))
+        Some(timing::timing_considered(self.timing(), applied, block))
     }
 
     /// The frames per audio callback actually in use, once the stream has settled: waits up to

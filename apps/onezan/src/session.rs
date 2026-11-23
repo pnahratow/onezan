@@ -5,7 +5,8 @@ use crate::plugins::load;
 use anyhow::Result;
 use onezan_engine::midi_in::POLL;
 use onezan_engine::{
-    AudioOut, Considered, Consumer, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, TimedEvent, Verdict, midi_queue,
+    AudioOut, Considered, Consumer, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, Output, TimedEvent, Verdict,
+    choose_midi_port, midi_queue,
 };
 use onezan_vst3_host::Plugin;
 use std::sync::Arc;
@@ -16,7 +17,10 @@ use std::time::Duration;
 pub struct Options {
     pub plugin: Option<String>,
     pub midi: Option<String>,
-    pub timing: MidiTiming,
+    /// `None`: the one used last time, else auto.
+    pub timing: Option<MidiTiming>,
+    /// `None`: the one chosen last time, else the best the system offers.
+    pub output: Option<Output>,
     /// Start the metronome at this tempo.
     pub metronome: Option<u32>,
     /// What was used last time, tried when nothing is given above. Best effort: what no longer
@@ -31,6 +35,9 @@ pub struct Remembered {
     pub plugin: Option<String>,
     /// The MIDI port's name, without its ALSA address (see [`port_name`]).
     pub midi: Option<String>,
+    /// The audio output chosen by hand.
+    pub output: Option<Output>,
+    pub timing: Option<MidiTiming>,
 }
 
 /// A MIDI port's name without the ALSA address at its end ("Keystation 49 MIDI 1 24:0" →
@@ -114,6 +121,10 @@ pub struct Session {
     // Dropped in this order: MIDI input, then audio (and the plugin's processor), then the plugin.
     watch: Option<MidiWatch>,
     audio: Option<AudioOut>,
+    /// The output chosen by hand; `None`: the automatic choice.
+    chosen_output: Option<Output>,
+    /// The MIDI port asked for by hand; `None`: the automatic choice.
+    chosen_midi: Option<String>,
     metronome: Arc<Metronome>,
     plugin: Plugin,
     /// The startup report: plugin, MIDI in, audio out, timing.
@@ -146,7 +157,7 @@ impl Session {
             considered: ports,
             detail: String::new(),
             short: String::new(),
-            hint: "choose another with --midi NAME",
+            hint: "choose another with --midi NAME, or in the window (click MIDI)",
         });
         let mut inputs = vec![midi_rx];
         inputs.extend(extra);
@@ -155,26 +166,35 @@ impl Session {
             metronome.set_bpm(bpm);
             metronome.set_on(true);
         }
-        let audio = AudioOut::start(&mut plugin, inputs, opts.timing, Arc::clone(&metronome))?;
-        report.push(Section {
-            label: "audio out",
-            considered: audio.considered.clone(),
-            detail: audio_detail(&audio),
-            short: audio_short(&audio),
-            hint: "",
-        });
-        if let Some(t) = audio.midi_timing() {
-            report.push(Section {
-                label: "timing",
-                short: audio.timing_mode().map_or_else(String::new, |m| m.name().to_string()),
-                considered: t,
-                detail: String::new(),
-                hint: "choose with --midi-timing exact|immediate|auto",
-            });
-        }
+        let timing = opts.timing.or(opts.remembered.timing).unwrap_or_default();
+        let metro = Arc::clone(&metronome);
+        let (audio, chosen_output) = match (&opts.output, &opts.remembered.output) {
+            (Some(o), _) => (
+                AudioOut::start(&mut plugin, inputs, timing, metro, Some(o))?,
+                Some(o.clone()),
+            ),
+            (None, Some(last)) => {
+                // The queues went into the first attempt: a new one for the keyboard (only the
+                // window remembers an output, and it has no other sources).
+                match AudioOut::start(&mut plugin, inputs, timing, metro, Some(last)) {
+                    Ok(a) => (a, Some(last.clone())),
+                    Err(e) => {
+                        log::warn!("the audio output chosen last time: {e:#}");
+                        let (tx, rx) = midi_queue();
+                        watch.set_queue(tx);
+                        let a = AudioOut::start(&mut plugin, vec![rx], timing, Arc::clone(&metronome), None)?;
+                        (a, None)
+                    }
+                }
+            }
+            (None, None) => (AudioOut::start(&mut plugin, inputs, timing, metro, None)?, None),
+        };
+        report.extend(audio_sections(&audio));
         Ok(Self {
             watch: Some(watch),
             audio: Some(audio),
+            chosen_output,
+            chosen_midi: opts.midi.clone(),
             metronome,
             plugin,
             report,
@@ -196,6 +216,93 @@ impl Session {
         self.report.iter().find(|s| s.label == label)
     }
 
+    /// The audio output in use.
+    pub fn output(&self) -> Option<Output> {
+        self.audio.as_ref().map(AudioOut::output)
+    }
+
+    /// The output chosen by hand; `None`: the automatic choice.
+    pub const fn chosen_output(&self) -> Option<&Output> {
+        self.chosen_output.as_ref()
+    }
+
+    /// The MIDI port asked for by hand; `None`: the automatic choice.
+    pub fn chosen_midi(&self) -> Option<&str> {
+        self.chosen_midi.as_deref()
+    }
+
+    /// The MIDI timing setting.
+    pub fn timing(&self) -> Option<MidiTiming> {
+        self.audio.as_ref().map(AudioOut::timing)
+    }
+
+    /// Switches the keyboard to the port `query` picks (`None`: the automatic choice). The
+    /// result arrives through the `on_midi` given to [`Session::start`].
+    pub fn choose_midi(&mut self, query: Option<String>) {
+        if let Some(w) = &self.watch {
+            w.choose(query.clone());
+        }
+        let ports = onezan_engine::midi_input_ports().unwrap_or_default();
+        let (_, considered) = choose_midi_port(&ports, query.as_deref());
+        if let Some(s) = self.report.iter_mut().find(|s| s.label == "MIDI in") {
+            s.considered = considered;
+        }
+        self.chosen_midi = query;
+    }
+
+    /// Changes the MIDI timing; the next audio block uses it.
+    pub fn set_timing(&mut self, t: MidiTiming) {
+        if let Some(a) = &self.audio {
+            a.set_timing(t);
+        }
+        self.refresh_audio_report();
+    }
+
+    /// Plays through `output` (`None`: the automatic choice). The audio stream starts again; the
+    /// plugin, its editor and the keyboard stay. Other event sources given to [`Session::start`]
+    /// (the demo) are not reconnected. When `output` does not work, the automatic choice is
+    /// started instead and the error returned.
+    ///
+    /// # Errors
+    ///
+    /// When `output` cannot be used (the automatic choice is playing then), or nothing can.
+    pub fn set_output(&mut self, output: Option<&Output>) -> Result<()> {
+        let timing = self.timing().unwrap_or_default();
+        if let Some(a) = self.audio.take() {
+            a.stop();
+        }
+        let start = |plugin: &mut Plugin, output: Option<&Output>| {
+            let (tx, rx) = midi_queue();
+            if let Some(w) = &self.watch {
+                w.set_queue(tx);
+            }
+            AudioOut::start(plugin, vec![rx], timing, Arc::clone(&self.metronome), output)
+        };
+        let result = match start(&mut self.plugin, output) {
+            Ok(a) => {
+                self.audio = Some(a);
+                self.chosen_output = output.cloned();
+                Ok(())
+            }
+            Err(e) if output.is_some() => {
+                self.audio = Some(start(&mut self.plugin, None)?);
+                self.chosen_output = None;
+                Err(e)
+            }
+            Err(e) => Err(e),
+        };
+        self.refresh_audio_report();
+        result
+    }
+
+    /// The report's audio and timing sections, as they are now.
+    fn refresh_audio_report(&mut self) {
+        self.report.retain(|s| s.label != "audio out" && s.label != "timing");
+        if let Some(a) = &self.audio {
+            self.report.extend(audio_sections(a));
+        }
+    }
+
     /// Saves the instrument's sound for the next start.
     pub fn save_sound(&self) {
         crate::instrument_state::save(&self.plugin);
@@ -208,6 +315,28 @@ impl Session {
         }
         self.plugin.stop();
     }
+}
+
+/// The report's sections for the audio output and the MIDI timing (once the block size is
+/// known: waits for it up to a second).
+fn audio_sections(audio: &AudioOut) -> Vec<Section> {
+    let mut sections = vec![Section {
+        label: "audio out",
+        considered: audio.considered.clone(),
+        detail: audio_detail(audio),
+        short: audio_short(audio),
+        hint: "choose another in the window (click Audio)",
+    }];
+    if let Some(t) = audio.midi_timing() {
+        sections.push(Section {
+            label: "timing",
+            short: audio.timing_mode().map_or_else(String::new, |m| m.name().to_string()),
+            considered: t,
+            detail: String::new(),
+            hint: "choose with --midi-timing exact|immediate|auto, or in the window (click Timing)",
+        });
+    }
+    sections
 }
 
 /// "JACK, 5.3 ms": the backend and the block length in use.

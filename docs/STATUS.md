@@ -80,7 +80,8 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   report.rs             the startup report as text
   gui.rs                the window (egui/eframe, OpenGL, our own event loop): editor, status bar,
                         keyboard
-  embed.rs              the X11 child window holding the plugin's editor; fitting it in
+  embed.rs              the child window holding the plugin's editor (X11 on Linux, HWND on
+                        Windows); fitting it in
   keyboard.rs           the on-screen keyboard widget: scale tint, velocity meter, fingering badges
   settings.rs           settings.json (config folder): tempo, click, scale, window size, the
                         instrument and keyboard used last time; data/config folder paths
@@ -117,7 +118,11 @@ Commit only when the user asks.
 - The octave button on a held note: set aside by the user for now.
 - Exact MIDI timing has only been checked offline and by the report; no system here gives short
   enough blocks to hear it (it is picked at 11 ms or less).
-- Real Windows: so far only under Wine (tests, plugin loading and processing with Surge XT; see "Windows checks under Wine"). Audio devices, MIDI, latency and the editor (HWND stub) are unchecked.
+- Real Windows: so far only under Wine (tests, plugin loading and processing with Surge XT, the
+  embedded editor; see "Windows checks under Wine"). Audio devices, MIDI and latency are unchecked.
+- Under Wine, after the window grows, a strip at its right edge can stay unpainted until the
+  next repaint (seen once, growing a floating window; shrinking is fine; does not happen without
+  an embedded editor). Probably Wine's OpenGL with child windows; check on real Windows.
 
 ## Next steps, in order
 
@@ -126,15 +131,16 @@ Commit only when the user asks.
 2. **Scale trainer basics**: hands separately and contrary motion, choosing octaves, showing the way down
    (melodic minor differs), the learning order (`fingering::LEARNING_ORDER`). The table is done
    (see "Fingering table" below).
-3. **Windows**: embed the editor in an HWND child window (the stub in `embed.rs`), and run the
-   app there for real (so far only lint/type-checked).
-4. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
+3. **Windows**: run the app on real Windows (so far only under Wine): audio, MIDI, the editor
+   (embedded, see "The plugin editor").
+4. **ASIO on Windows** (next milestone; see "ASIO (planned)" below for what is known).
+5. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
    installed, so the first start always makes sound.
-5. Choosing the MIDI port in the window (optional override; the automatic choice stays the
-   default). The instrument can be chosen already (see "Choosing the instrument").
-6. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
+6. Choosing the MIDI port, audio output and timing in the window: done (see "Choosing MIDI,
+   audio and timing"); check by hand with the mouse, and on Windows.
+7. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
    in the embedded editor; sharpness under fractional scaling (XWayland).
-7. Later: CLAP via `clack-host`.
+8. Later: CLAP via `clack-host`.
 
 ## Known gaps and shortcuts in the current code
 
@@ -287,8 +293,16 @@ The middle of the window shows the plugin's own editor (`IPlugView`), embedded.
   CPU in the VM (software GL); now about 4 % idle.
 - **Closing**: the editor is removed when the window's close is requested, before the window and
   the plugin go. Checked: clean exit, nothing left registered.
-- Not done or not checked: Windows (stub, the middle shows a note); mouse and keyboard in the
-  editor (the VM cannot send real input); under fractional scaling XWayland windows are scaled
+- **Windows** (2026-11-23): a child `HWND` of ours (`WS_CHILD`, own window class) inside the
+  main window, the editor attached to it; moved with `SetWindowPos`. The plugin's timers and input
+  are window messages, dispatched by winit's loop on the UI thread, so `idle` does nothing there.
+  winit gives the main window `WS_CLIPCHILDREN`, so our GL drawing leaves the editor alone.
+  Surge XT (JUCE) asks with `resizeView` for its old size right after we resize it, yet stays at
+  the new one (black band below it); so after a request the app takes `getSize`, not the rect.
+  Checked under Wine with Surge XT 1.3.4 for Windows: embedded, fills the width, follows window
+  resizes, hover tooltips show (mouse reaches it), clean exit on close.
+- Not done or not checked: mouse and keyboard in the editor on Linux (the VM cannot send real
+  input); under fractional scaling XWayland windows are scaled
   by the desktop and may look soft; keyboard focus inside the editor.
 
 ## Metronome (2026-11-23)
@@ -416,7 +430,8 @@ printed a different id than on Linux. Ids are now printed in the SDK's canonical
 everywhere (`util::class_id_string`), as other hosts and `.vstpreset` files show them. A test checks the
 settings and data folders are `%APPDATA%\onezan` there. The app itself runs under Wine
 (`wine target/x86_64-pc-windows-gnu/debug/onezan.exe`): the window, the Windows plugin folders,
-no MIDI ports (Wine passes none through by default). Wine is not Windows: real audio, MIDI,
+no MIDI ports (Wine passes none through by default), and the plugin's editor embedded (see
+"The plugin editor"). Wine is not Windows: real audio, MIDI,
 latency and the editor still need a Windows VM or PC (see the next steps).
 
 ## Choosing the instrument (2026-11-23)
@@ -435,3 +450,65 @@ Checked in the VM with a throwaway build that switched by itself (no click tool 
 to Surge XT again (full teardown and restart: sound saved and restored, editor embedded again,
 MIDI reconnected) and to a missing id (Surge XT back, the reason shown). Not checked: switching
 between two different instruments (only one is installed here), with the mouse.
+
+## Choosing MIDI, audio and timing (2026-11-23)
+
+The bar's MIDI, Audio and Timing values are buttons that open menus (egui popups, opening
+downwards over the keyboard: the editor would cover anything above; long lists scroll). Each
+menu starts with "Automatic", which stays the default; hovering still shows the report.
+
+- **MIDI**: Automatic (the first port that is not a loopback) or a port, listed when the menu
+  opens. `MidiWatch::choose` closes the open port (held notes released) and opens the one the
+  query picks at once; the query stays for later replugs. The connected port is remembered as
+  before.
+- **Audio**: Automatic (`pick_output`) or any device of any audio system
+  (`onezan_engine::audio_outputs`, listed when the menu opens; ALSA's listing prints "Unknown PCM"
+  lines to stderr). JACK is one entry, "default": cpal names its devices after our own client
+  (`cpal_client_out-62`), which changes every run. Choosing one restarts only the audio stream
+  (`Session::set_output`): the plugin is deactivated and started again, its editor stays open, the
+  keyboard gets a new queue (`MidiWatch::set_queue`). An output that fails gives way to the
+  automatic choice, and the menu says why in red. Saved as `"audio": {"backend", "device"}`; a
+  saved output that is gone falls back to automatic at start (logged).
+- **Timing**: auto, exact or immediate, applied from the next audio block (`SharedTiming`, an
+  atomic the callback reads). Saved as `"midi_timing"`; `--midi-timing` on `gui` wins over it.
+- Switching instrument keeps all three.
+
+Checked on the host with a throwaway build that picked by itself (no click tool): timing changed
+live; ALSA "default" chosen (block 2048) and back to JACK; the Midi Through port chosen and back
+to automatic (released, waiting for a keyboard); a missing output fell back to automatic; the
+choices saved and used at the next start; the audio menu open over the keyboard (screenshot). Test:
+`midi_hotplug.rs` switches between two virtual ports (held note released, new queue used). Not
+checked: clicking with the mouse, the menus on Windows/Wine.
+
+## ASIO (planned, next milestone)
+
+The low-latency drivers of audio interfaces; Windows users expect it in the Audio menu.
+DirectSound is not planned: since Vista it runs on WASAPI, so it is never faster, and cpal does
+not have it.
+
+- **Plan**: cpal's `asio` feature for Windows only. ASIO drivers appear in the Audio menu by
+  themselves (cpal lists the ASIO host). Automatic stays WASAPI at first: generic drivers
+  (ASIO4ALL, FlexASIO, Realtek's) can take the device away from other programs or misbehave.
+  Later, once checked on real hardware, Automatic could prefer an interface's own ASIO driver.
+- **Licence**: the ASIO SDK is dual-licensed, proprietary or GPLv3 (since October 2025; its
+  LICENSE.txt says so). onezan is GPL-3.0-or-later, so it fits. asio-sys downloads the SDK at
+  build time (to `/tmp/asio_sdk`). asio-sys itself is Apache-2.0.
+- **Building for `x86_64-pc-windows-gnu` from Linux** (tried 2026-11-23, then taken out again):
+  needs clang. Two problems, both solved:
+  1. asio-sys does not tell bindgen the target, so clang lays structs out for Linux. Fix, in
+     `.cargo/config.toml` `[env]`: `BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_gnu =
+     "--target=x86_64-w64-mingw32 -I/usr/x86_64-w64-mingw32/include"` (then
+     `cargo clean -p asio-sys --target x86_64-pc-windows-gnu`: the build script does not rerun).
+  2. Still a layout check failure: `AsioDrivers::connID` at offset 12. MinGW uses the Itanium C++
+     ABI, which puts a derived class's first field in the base class's tail padding; a `repr(C)`
+     struct cannot. Rust never uses its fields. Fix: a vendored asio-sys 0.2.6 with
+     `.opaque_type("AsioDrivers")` after `.allowlist_type("AsioDrivers")` in `build.rs`, through
+     `[patch.crates-io]` (and `exclude` it from the workspace). asio-sys 0.4 (newest cpal) has the
+     same allowlist, so upgrading cpal does not help. Worth sending upstream.
+  With both, the Windows build succeeded.
+- **Testing under Wine**: wineasio 1.3.0 (Arch package) with Wine 11.20. Its `wineasio-register`
+  script fails ("no wine64 was found": Wine is a single `wine` binary now), and
+  `wine regsvr32 wineasio64.dll` fails too ("Failed to load DLL", status c0000135: a DLL it
+  needs was not found). Unsolved; next idea: check what `wineasio64.dll.so` needs (libjack, with
+  JACK running through PipeWire) and whether the DLL must be copied into the prefix's
+  `system32`. Real latency and real interface drivers need a Windows PC either way.

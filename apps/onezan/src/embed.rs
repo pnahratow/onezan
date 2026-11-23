@@ -3,6 +3,8 @@
 //! Linux: the editor needs an X11 parent, so the window runs on X11 (XWayland under a Wayland
 //! desktop, see `gui::run`). A child window of ours is placed over the middle area and the editor
 //! is attached to it; it is moved and resized with the layout.
+//!
+//! Windows: the same with a child `HWND` of the main window.
 
 use onezan_vst3_host::Editor;
 
@@ -57,8 +59,15 @@ impl Embedded {
     }
 
     /// Takes a size the editor asked for. Returns whether it changed.
+    ///
+    /// The size it then reports wins over the one it asked for: Surge XT on Windows (JUCE) asks
+    /// for its old size right after a resize, but stays at the new one.
     pub fn follow_requests(&mut self) -> bool {
-        match self.editor.requested_size() {
+        match self
+            .editor
+            .requested_size()
+            .map(|asked| self.editor.size().unwrap_or(asked))
+        {
             Some(s) if s != self.size => {
                 self.size = s;
                 self.placed = None;
@@ -167,19 +176,113 @@ fn to_i16(n: i32) -> i16 {
     i16::try_from(n).unwrap_or(if n < 0 { i16::MIN } else { i16::MAX })
 }
 
-/// Windows and others: not done yet; [`ChildWindow::new`] always fails.
-#[cfg(not(target_os = "linux"))]
+// Windows: a child window of ours inside the main window (`WS_CHILD`); the editor makes its own
+// child window in it. The plugin's timers and input arrive as window messages, which winit's
+// loop dispatches on this (the UI) thread. winit gives its windows `WS_CLIPCHILDREN`, so our
+// OpenGL drawing does not paint over the editor.
+
+#[cfg(target_os = "windows")]
+pub struct ChildWindow {
+    hwnd: windows_sys::Win32::Foundation::HWND,
+}
+
+#[cfg(target_os = "windows")]
+impl ChildWindow {
+    fn new(parent: u64, at: PixelRect) -> Result<Self, String> {
+        use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject};
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, RegisterClassW, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+            WS_VISIBLE,
+        };
+        let parent: windows_sys::Win32::Foundation::HWND =
+            std::ptr::with_exposed_provenance_mut(usize::try_from(parent).map_err(|_| "not a window handle")?);
+        let class: Vec<u16> = "onezan-plugin-editor\0".encode_utf16().collect();
+        // SAFETY: plain Win32 calls on the UI thread; `class` outlives them (a class registered
+        // twice fails harmlessly, the first one stays).
+        unsafe {
+            let instance = GetModuleHandleW(std::ptr::null());
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(DefWindowProcW),
+                hInstance: instance,
+                hbrBackground: GetStockObject(BLACK_BRUSH),
+                lpszClassName: class.as_ptr(),
+                // SAFETY: all-zero is valid for the remaining fields (no icon, cursor, menu).
+                ..std::mem::zeroed()
+            };
+            RegisterClassW(&raw const wc);
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                at.x,
+                at.y,
+                to_i32(at.w),
+                to_i32(at.h),
+                parent,
+                std::ptr::null_mut(),
+                instance,
+                std::ptr::null(),
+            );
+            if hwnd.is_null() {
+                return Err(format!(
+                    "cannot make a child window: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(Self { hwnd })
+        }
+    }
+
+    /// The window as the editor's parent: its `HWND`.
+    const fn handle(&self) -> *mut std::ffi::c_void {
+        self.hwnd
+    }
+
+    fn set_geometry(&self, at: PixelRect) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+        // SAFETY: our live window, UI thread.
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                std::ptr::null_mut(),
+                at.x,
+                at.y,
+                to_i32(at.w),
+                to_i32(at.h),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ChildWindow {
+    fn drop(&mut self) {
+        // SAFETY: our live window, UI thread; the editor was removed from it first.
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn to_i32(n: u32) -> i32 {
+    i32::try_from(n.max(1)).unwrap_or(i32::MAX)
+}
+
+/// Others: not done; [`ChildWindow::new`] always fails.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub struct ChildWindow;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 #[expect(
     clippy::unused_self,
     clippy::missing_const_for_fn,
-    reason = "a stub until embedding is done on this platform"
+    reason = "a stub: no embedding on this platform"
 )]
 impl ChildWindow {
     fn new(_parent: u64, _at: PixelRect) -> Result<Self, String> {
-        Err("embedding the plugin's editor is not done on this platform yet".into())
+        Err("embedding the plugin's editor is not done on this platform".into())
     }
 
     fn handle(&self) -> *mut std::ffi::c_void {

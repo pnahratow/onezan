@@ -57,8 +57,10 @@ enum Cmd {
         /// MIDI input port (substring of its name). Default: first port that is not a loopback.
         #[arg(long)]
         midi: Option<String>,
-        #[arg(long, value_enum, default_value_t = Timing::Auto)]
-        midi_timing: Timing,
+        /// How notes are placed in the audio block (see `play`). Default: the one chosen last
+        /// time in the window, else auto.
+        #[arg(long, value_enum)]
+        midi_timing: Option<Timing>,
         /// Start the metronome at this many beats per minute.
         #[arg(long, value_name = "BPM")]
         metronome: Option<u32>,
@@ -104,7 +106,8 @@ fn main() -> Result<()> {
         None => gui::run(Options {
             plugin: None,
             midi: None,
-            timing: MidiTiming::Auto,
+            timing: None,
+            output: None,
             metronome: None,
             remembered: Remembered::default(),
         }),
@@ -116,7 +119,8 @@ fn main() -> Result<()> {
         }) => gui::run(Options {
             plugin,
             midi,
-            timing: midi_timing.into(),
+            timing: midi_timing.map(Into::into),
+            output: None,
             metronome,
             remembered: Remembered::default(),
         }),
@@ -144,7 +148,8 @@ fn main() -> Result<()> {
             &Options {
                 plugin,
                 midi,
-                timing: midi_timing.into(),
+                timing: Some(midi_timing.into()),
+                output: None,
                 metronome,
                 remembered: Remembered::default(),
             },

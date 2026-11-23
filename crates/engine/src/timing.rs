@@ -15,6 +15,7 @@
 
 use crate::report::{Considered, Verdict};
 use onezan_vst3_host::MidiEvent;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 /// A MIDI event with the time it arrived.
@@ -61,6 +62,30 @@ pub fn block_duration(frames: usize, rate: u32) -> Duration {
 }
 
 impl MidiTiming {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Exact, Self::Immediate];
+
+    /// The setting called `name` (as [`MidiTiming::name`] gives it).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.name() == name)
+    }
+
+    const fn to_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Exact => 1,
+            Self::Immediate => 2,
+        }
+    }
+
+    const fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Exact,
+            2 => Self::Immediate,
+            _ => Self::Auto,
+        }
+    }
+
     /// The mode in use for a block of `frames` at `rate` Hz: never [`MidiTiming::Auto`].
     #[must_use]
     pub fn resolve(self, frames: usize, rate: u32) -> Self {
@@ -79,6 +104,26 @@ impl MidiTiming {
             Self::Exact => "exact",
             Self::Immediate => "immediate",
         }
+    }
+}
+
+/// The timing setting, shared with the audio callback: it can change while audio runs.
+#[derive(Debug, Default)]
+pub struct SharedTiming(AtomicU8);
+
+impl SharedTiming {
+    #[must_use]
+    pub const fn new(t: MidiTiming) -> Self {
+        Self(AtomicU8::new(t.to_u8()))
+    }
+
+    #[must_use]
+    pub fn get(&self) -> MidiTiming {
+        MidiTiming::from_u8(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, t: MidiTiming) {
+        self.0.store(t.to_u8(), Ordering::Relaxed);
     }
 }
 
@@ -133,7 +178,7 @@ pub fn timing_considered(setting: MidiTiming, applied: MidiTiming, block: Durati
             format!("the block is long ({ms:.1} ms, over {limit:.0} ms): a whole block of extra delay would hurt more"),
             format!("steady timing, but {ms:.1} ms more delay"),
         ),
-        _ => ("chosen with --midi-timing".to_string(), "not chosen".to_string()),
+        _ => ("chosen by hand".to_string(), "not chosen".to_string()),
     };
     let (used, other) = if applied == MidiTiming::Exact {
         (exact, immediate)
@@ -213,6 +258,6 @@ mod tests {
         assert!(c[0].name.starts_with("immediate"));
         assert!(c[0].why.contains("long"));
         let c = timing_considered(MidiTiming::Exact, MidiTiming::Exact, long);
-        assert!(c[0].why.contains("--midi-timing"));
+        assert!(c[0].why.contains("by hand"));
     }
 }

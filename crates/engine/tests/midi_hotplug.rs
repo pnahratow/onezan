@@ -90,4 +90,77 @@ mod tests {
         );
         drop(watch);
     }
+
+    #[test]
+    fn choosing_another_port_switches_and_releases_held_notes() {
+        let Ok(out) = midir::MidiOutput::new("onezan-test") else {
+            eprintln!("no ALSA sequencer; skipping");
+            return;
+        };
+        let mut first_keys = out.create_virtual("onezan-test-first").expect("virtual port");
+        let mut second_keys = midir::MidiOutput::new("onezan-test")
+            .unwrap()
+            .create_virtual("onezan-test-second")
+            .expect("virtual port");
+        let (tx, mut rx) = midi_queue();
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&changes);
+        let (watch, first, _) =
+            MidiWatch::start(Some("onezan-test-first".into()), POLL, tx, Arc::default(), move |c| {
+                log.lock().unwrap().push(c);
+            })
+            .unwrap();
+        assert!(
+            matches!(&first, Some(MidiChange::Connected(p)) if p.contains("first")),
+            "{first:?}"
+        );
+        let mut got = Vec::new();
+        first_keys.send(&[0x90, 60, 100]).unwrap();
+        receive(
+            &mut rx,
+            &mut got,
+            MidiEvent::NoteOn {
+                channel: 0,
+                key: 60,
+                velocity: 100,
+            },
+        );
+
+        // Choosing the other port releases the held key and connects at once.
+        watch.choose(Some("onezan-test-second".into()));
+        receive(
+            &mut rx,
+            &mut got,
+            MidiEvent::NoteOff {
+                channel: 0,
+                key: 60,
+                velocity: 64,
+            },
+        );
+        wait(
+            "switch",
+            || matches!(changes.lock().unwrap().last(), Some(MidiChange::Connected(p)) if p.contains("second")),
+        );
+
+        // A new queue (audio started again) gets the events from now on; the old port is closed.
+        let (tx, mut rx) = midi_queue();
+        watch.set_queue(tx);
+        first_keys.send(&[0x90, 61, 100]).unwrap();
+        second_keys.send(&[0x90, 62, 90]).unwrap();
+        let mut got = Vec::new();
+        receive(
+            &mut rx,
+            &mut got,
+            MidiEvent::NoteOn {
+                channel: 0,
+                key: 62,
+                velocity: 90,
+            },
+        );
+        assert!(
+            !got.iter().any(|e| matches!(e, MidiEvent::NoteOn { key: 61, .. })),
+            "{got:?}"
+        );
+        drop(watch);
+    }
 }

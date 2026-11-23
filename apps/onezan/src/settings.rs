@@ -26,6 +26,37 @@ pub struct Settings {
     /// The MIDI keyboard used last time (its port name, without the ALSA address).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi: Option<String>,
+    /// The audio output chosen by hand; missing: the automatic choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioSetting>,
+    /// The MIDI timing ("auto", "exact", "immediate"); missing: auto.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_timing: Option<String>,
+}
+
+/// An audio output: the audio system ("ALSA", "JACK", "WASAPI") and the device's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioSetting {
+    pub backend: String,
+    pub device: String,
+}
+
+impl From<AudioSetting> for onezan_engine::Output {
+    fn from(a: AudioSetting) -> Self {
+        Self {
+            backend: a.backend,
+            device: a.device,
+        }
+    }
+}
+
+impl From<onezan_engine::Output> for AudioSetting {
+    fn from(o: onezan_engine::Output) -> Self {
+        Self {
+            backend: o.backend,
+            device: o.device,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -173,6 +204,11 @@ mod tests {
             window: Some([1200.0, 760.0]),
             instrument: Some("ABCD".into()),
             midi: Some("Keystation".into()),
+            audio: Some(AudioSetting {
+                backend: "ALSA".into(),
+                device: "default".into(),
+            }),
+            midi_timing: Some("exact".into()),
         }
     }
 

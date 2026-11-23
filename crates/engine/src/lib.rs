@@ -20,13 +20,13 @@ mod offline;
 mod report;
 pub mod timing;
 
-pub use audio_out::{AudioOut, REQUESTED_FRAMES, request_low_latency};
+pub use audio_out::{AudioOut, Output, REQUESTED_FRAMES, audio_outputs, request_low_latency};
 pub use metronome::{Click, Metronome};
 pub use midi_in::{Keys, MidiChange, MidiWatch, choose_midi_port, midi_input_ports};
 pub use offline::render_offline;
 pub use report::{Considered, Verdict};
 pub use rtrb::{Consumer, Producer, RingBuffer};
-pub use timing::{MidiTiming, TimedEvent};
+pub use timing::{MidiTiming, SharedTiming, TimedEvent};
 
 /// Capacity of each MIDI queue (events between two audio blocks).
 pub const QUEUE_CAP: usize = 1024;

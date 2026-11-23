@@ -184,8 +184,10 @@ impl Keys {
 
 /// Watches the MIDI ports and keeps one open; stops when dropped.
 pub struct MidiWatch {
-    stop: Option<mpsc::Sender<()>>,
+    /// Ports to choose; dropping it stops the thread.
+    choose: Option<mpsc::Sender<Option<String>>>,
     thread: Option<JoinHandle<()>>,
+    feed: Arc<Mutex<Feed>>,
 }
 
 impl MidiWatch {
@@ -206,28 +208,35 @@ impl MidiWatch {
         keys: Arc<Keys>,
         mut on_change: impl FnMut(MidiChange) + Send + 'static,
     ) -> Result<(Self, Option<MidiChange>, Vec<Considered>)> {
+        let feed = Arc::new(Mutex::new(Feed::new(tx, keys)));
         let mut watcher = Watcher {
             list: midir::MidiInput::new("onezan")?,
             query,
-            feed: Arc::new(Mutex::new(Feed::new(tx, keys))),
+            feed: Arc::clone(&feed),
             open: None,
             last_error: None,
         };
         let (first, considered) = watcher.step();
-        let (stop, stopped) = mpsc::channel::<()>();
+        let (choose, chosen) = mpsc::channel::<Option<String>>();
         let thread = std::thread::Builder::new()
             .name("onezan-midi-watch".into())
             .spawn(move || {
-                while stopped.recv_timeout(poll) == Err(RecvTimeoutError::Timeout) {
-                    if let (Some(change), _) = watcher.step() {
-                        on_change(change);
+                loop {
+                    let change = match chosen.recv_timeout(poll) {
+                        Err(RecvTimeoutError::Timeout) => watcher.step().0,
+                        Ok(query) => watcher.choose(query),
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    if let Some(c) = change {
+                        on_change(c);
                     }
                 }
             })?;
         Ok((
             Self {
-                stop: Some(stop),
+                choose: Some(choose),
                 thread: Some(thread),
+                feed,
             },
             first,
             considered,
@@ -235,9 +244,25 @@ impl MidiWatch {
     }
 }
 
+impl MidiWatch {
+    /// Switches to the port [`choose_midi_port`] picks for `query` (`None`: any keyboard): the
+    /// open port is closed (its held notes released) and the new one opened at once; later
+    /// keyboards are matched against `query` too. The result comes through `on_change`.
+    pub fn choose(&self, query: Option<String>) {
+        if let Some(c) = &self.choose {
+            let _ = c.send(query);
+        }
+    }
+
+    /// Sends the events to `tx` from now on (when the audio output starts again).
+    pub fn set_queue(&self, tx: Producer<TimedEvent>) {
+        lock(&self.feed).tx = tx;
+    }
+}
+
 impl Drop for MidiWatch {
     fn drop(&mut self) {
-        drop(self.stop.take());
+        drop(self.choose.take());
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -261,6 +286,19 @@ struct Watcher {
 }
 
 impl Watcher {
+    /// Closes the open port and opens the one `query` picks (see [`MidiWatch::choose`]).
+    fn choose(&mut self, query: Option<String>) -> Option<MidiChange> {
+        self.query = query;
+        self.last_error = None;
+        let closed = self.open.take().map(|open| {
+            let name = open.name.clone();
+            drop(open);
+            lock(&self.feed).release_all();
+            name
+        });
+        self.step().0.or_else(|| closed.map(MidiChange::Disconnected))
+    }
+
     /// One poll: notices a vanished port, or opens one. Also returns the verdict on every port.
     fn step(&mut self) -> (Option<MidiChange>, Vec<Considered>) {
         let ports: Vec<(String, String)> = self

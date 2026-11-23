@@ -2,24 +2,19 @@
 //! [`crate::timing`]) and runs the plugin. Allocates nothing and takes no locks.
 
 use crate::metronome::{Clicker, Metronome};
-use crate::timing::{self, MidiTiming, TimedEvent};
+use crate::timing::{self, MidiTiming, SharedTiming, TimedEvent};
 use crate::{MAX_CALLBACK_FRAMES, QUEUE_CAP};
 use onezan_vst3_host::{MidiEvent, Processor};
 use rtrb::Consumer;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 /// Values the audio callback publishes for the startup report.
 pub struct Report {
     /// Frames per callback, once settled.
     pub block: Arc<AtomicU32>,
-    /// [`APPLIED_EXACT`] or [`APPLIED_IMMEDIATE`], once settled.
-    pub applied: Arc<AtomicU8>,
 }
-
-pub const APPLIED_EXACT: u8 = 1;
-pub const APPLIED_IMMEDIATE: u8 = 2;
 
 /// State owned by the audio callback. Everything is allocated up front.
 pub struct Callback {
@@ -33,7 +28,7 @@ pub struct Callback {
     right: Vec<f32>,
     channels: usize,
     rate: u32,
-    timing: MidiTiming,
+    timing: Arc<SharedTiming>,
     /// When the previous callback ran: exact timing maps the time since then onto this block.
     prev: Option<Instant>,
     report: Report,
@@ -52,7 +47,7 @@ impl Callback {
         inputs: Vec<Consumer<TimedEvent>>,
         channels: usize,
         rate: u32,
-        timing: MidiTiming,
+        timing: Arc<SharedTiming>,
         report: Report,
         metronome: Arc<Metronome>,
     ) -> Self {
@@ -79,19 +74,13 @@ impl Callback {
         let prev = self.prev.replace(now);
         let ch = self.channels;
         let frames = out.len().checked_div(ch).unwrap_or(0);
-        let mode = self.timing.resolve(frames, self.rate);
+        let mode = self.timing.get().resolve(frames, self.rate);
         if self.callbacks < SETTLE_CALLBACKS {
             self.callbacks = self.callbacks.saturating_add(1);
         } else {
             self.report
                 .block
                 .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Relaxed);
-            let applied = if mode == MidiTiming::Exact {
-                APPLIED_EXACT
-            } else {
-                APPLIED_IMMEDIATE
-            };
-            self.report.applied.store(applied, Ordering::Relaxed);
         }
 
         self.events.clear();
