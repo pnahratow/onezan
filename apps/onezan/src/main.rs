@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use onezan_engine::{AudioOut, Considered, MidiTiming, TimedEvent, Verdict, midi_queue};
+use onezan_engine::{AudioOut, Considered, MidiChange, MidiTiming, TimedEvent, Verdict, midi_queue};
 use onezan_vst3_host::{MidiEvent, Plugin, PluginInfo};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -233,6 +233,15 @@ fn audio_detail(audio: &AudioOut) -> String {
     format!("{} Hz, {block_text}{not_granted}", audio.sample_rate)
 }
 
+/// A MIDI port change, for the user.
+fn midi_change(c: &MidiChange) -> String {
+    match c {
+        MidiChange::Connected(p) => format!("{p} connected"),
+        MidiChange::Disconnected(p) => format!("{p} unplugged; held notes released; waiting for a keyboard"),
+        MidiChange::Failed { port, error } => format!("cannot open {port}: {error}; retrying"),
+    }
+}
+
 /// C major, one octave up and down, from middle C.
 const SCALE: [u8; 15] = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60];
 
@@ -247,13 +256,16 @@ fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool, timing: Mi
     let (midi_tx, midi_rx) = midi_queue();
     let (demo_tx, demo_rx) = midi_queue();
 
-    let (midi_in, ports) = onezan_engine::open_midi_input(midi_arg, midi_tx)?;
+    let (watch, first, ports) =
+        onezan_engine::MidiWatch::start(midi_arg.map(String::from), onezan_engine::midi_in::POLL, midi_tx, |c| {
+            println!("{:<10}{}", "MIDI in", midi_change(&c));
+        })?;
     report("MIDI in", &ports, "", "choose another with --midi NAME");
-    match (&midi_in, midi_arg) {
-        (Some(_), _) => {}
-        (None, Some(q)) => bail!("no MIDI input port matches {q:?} (see `onezan midi`)"),
-        (None, None) if !demo => bail!("no MIDI keyboard found (connect one, or try --demo)"),
-        (None, None) => println!("{:<10}  no keyboard; playing the demo only", ""),
+    match (first, midi_arg) {
+        (Some(MidiChange::Connected(_)), _) => {}
+        (Some(c), _) => println!("{:<10}  {}", "", midi_change(&c)),
+        (None, Some(q)) => println!("{:<10}  no port matches {q:?} yet: it is used once it appears", ""),
+        (None, None) => println!("{:<10}  no keyboard yet: plug one in and it is used", ""),
     }
 
     let audio = AudioOut::start(&mut plugin, vec![midi_rx, demo_rx], timing)?;
@@ -265,17 +277,15 @@ fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool, timing: Mi
     let demo_thread = demo.then(|| std::thread::spawn(move || play_scale(demo_tx)));
     if let Some(t) = demo_thread {
         t.join().ok();
-        if midi_in.is_none() {
-            std::thread::sleep(Duration::from_millis(1500));
-        }
     }
-    if midi_in.is_some() {
-        println!("playing — press Enter to quit");
-        let _ = std::io::stdin().lock().lines().next();
+    println!("playing — press Enter to quit");
+    if std::io::stdin().lock().lines().next().is_none() && demo {
+        // No terminal (stdin closed): let the demo's last note ring out.
+        std::thread::sleep(Duration::from_millis(1500));
     }
-    // The stream (and with it the plugin's processor) goes first, then the plugin.
+    // The MIDI input first, then the stream (and with it the plugin's processor), then the plugin.
+    drop(watch);
     audio.stop();
-    drop(midi_in);
     plugin.stop();
     Ok(())
 }

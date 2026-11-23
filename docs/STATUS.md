@@ -72,15 +72,16 @@ Commit only when the user asks.
 - `play --demo` sounds. By hand with the keyboard (SWISSONIC EasyKeys49): notes, sustain pedal,
   pitch bend, fast repeated notes and big chords work; quitting with Enter and Ctrl+C is clean.
 - The user's real machine (Linux Mint, PipeWire 1.0.5): ALSA gives 1280-frame blocks (26.7 ms),
-  noticeable but okay; with pipewire-jack installed, `pw-jack onezan play` gets JACK. The dev VM gives 1024 frames on JACK.
+  noticeable but okay; with pipewire-jack installed, `pw-jack onezan play` gets JACK at 256
+  frames (5.3 ms), and auto timing picks exact. The dev VM gives 1024 frames on JACK.
 - Offline checks against the installed plugin (`crates/engine/tests/plugin.rs`, skipped without
   one): a note at frame N sounds from N (not from its block start); a released note goes silent;
   the sustain pedal holds and releases.
 
 ## Not yet verified / known problems
 
-- **Replugging the keyboard leaves it silent**: the MIDI port is opened once at start-up. Same for
-  plugging a keyboard in after starting.
+- MIDI reconnect: replugging the real keyboard verified by the user; also tested with a virtual ALSA port (`crates/engine/tests/midi_hotplug.rs`). Not
+  tested on Windows.
 - The mod wheel has no audible effect in Surge's default patch; unclear what it should do. Later.
 - The octave button on a held note: set aside by the user for now.
 - Exact MIDI timing has only been checked offline and by the report; no system here gives short
@@ -89,10 +90,9 @@ Commit only when the user asks.
 
 ## Next steps, in order
 
-1. Reconnect the MIDI keyboard when it is unplugged and plugged back, and pick up a keyboard
-   connected after start-up (watch the port list; "just works").
-2. Try `pipewire-jack` on the real machine (if it runs PipeWire), and compare `--midi-timing`
-   modes by ear where blocks are short.
+1. Check reconnect by hand: unplug and replug the keyboard during `play`, also while holding a
+   note; start without a keyboard and plug it in.
+2. Compare `--midi-timing` modes by ear on the real machine (256-frame blocks under `pw-jack`).
 3. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
    installed, so the first start always makes sound.
 4. **Plugin editor window** (so the user can pick sounds): IPlugView, IPlugFrame, and IRunLoop
@@ -172,6 +172,16 @@ uneven). `--midi-timing auto` (default) picks exact for blocks of at most 11 ms,
 per callback, so it follows block size changes. The plugin gets each event at its sample
 (`sampleOffset`, and the parameter point offset for CCs). Events from several sources are merged
 with a stable insertion sort (no allocation). `play` reports the mode and why.
+
+## MIDI reconnect (2026-11-23)
+
+`crates/engine/src/midi_in.rs`. `MidiWatch` polls the port list once a second (midir has no
+hotplug events). When the open port disappears, it sends note-offs for every key it held, and
+sustain, mod wheel and pitch bend back to rest, so nothing hangs. When no port is open, it opens
+the one `choose_midi_port` picks (so `--midi` applies to later keyboards too). `play` no longer
+exits without a keyboard: it says to plug one in, and prints each connect and unplug. A failing
+port is retried every poll and reported once. A replug within one poll that gets the same ALSA
+port address back would go unnoticed.
 
 ## Lints (2026-11-23)
 

@@ -4,15 +4,17 @@
 //! callback through lock-free SPSC queues (`rtrb`); the callback drains them at the start of each
 //! block, places each event in the block (see [`timing`]) and runs the plugin.
 
+pub mod midi_in;
 pub mod timing;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use onezan_vst3_host::{MidiEvent, Plugin, Processor};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+pub use midi_in::{MidiChange, MidiWatch};
 pub use rtrb::{Consumer, Producer, RingBuffer};
 pub use timing::{MidiTiming, TimedEvent};
 
@@ -73,12 +75,6 @@ pub fn midi_input_ports() -> Result<Vec<String>> {
     Ok(input.ports().iter().filter_map(|p| input.port_name(p).ok()).collect())
 }
 
-/// An open MIDI input; closes when dropped.
-pub struct MidiIn {
-    pub port_name: String,
-    _conn: midir::MidiInputConnection<()>,
-}
-
 /// A loopback port ("Midi Through"): it only echoes what other programs send, it is no keyboard.
 fn is_loopback(port: &str) -> bool {
     port.to_lowercase().contains("through")
@@ -115,42 +111,6 @@ pub fn choose_midi_port(ports: &[String], query: Option<&str>) -> (Option<usize>
         })
         .collect();
     (chosen, considered)
-}
-
-/// Opens the port [`choose_midi_port`] picks, and returns it (`None` when nothing fits) with the
-/// verdict on every port.
-///
-/// # Errors
-///
-/// When the system MIDI client cannot be created or the port cannot be opened.
-pub fn open_midi_input(query: Option<&str>, mut tx: Producer<TimedEvent>) -> Result<(Option<MidiIn>, Vec<Considered>)> {
-    let mut input = midir::MidiInput::new("onezan")?;
-    input.ignore(midir::Ignore::All);
-    let (ports, names): (Vec<midir::MidiInputPort>, Vec<String>) = input
-        .ports()
-        .into_iter()
-        .filter_map(|p| input.port_name(&p).ok().map(|n| (p, n)))
-        .unzip();
-    let (chosen, considered) = choose_midi_port(&names, query);
-    let Some((port, port_name)) = chosen.and_then(|i| ports.get(i).zip(names.get(i))) else {
-        return Ok((None, considered));
-    };
-    let port_name = port_name.clone();
-    let conn = input
-        .connect(
-            port,
-            "onezan-in",
-            move |_stamp, bytes, ()| {
-                // Stamped on arrival; midir's own stamp is on another clock (and per platform).
-                if let Some(ev) = MidiEvent::parse(bytes) {
-                    // A full queue drops the event; the audio thread is not keeping up anyway.
-                    let _ = tx.push(TimedEvent::now(ev));
-                }
-            },
-            (),
-        )
-        .map_err(|e| anyhow!("cannot open MIDI port {port_name}: {e}"))?;
-    Ok((Some(MidiIn { port_name, _conn: conn }), considered))
 }
 
 // ---- audio output ----------------------------------------------------------------------------
