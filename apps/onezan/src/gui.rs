@@ -12,7 +12,7 @@ use crate::session::{Options, Section, Session};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
-use onezan_engine::{Keys, Metronome, MidiChange, Verdict};
+use onezan_engine::{Click, Keys, Metronome, MidiChange, Verdict};
 use onezan_vst3_host::Editor;
 use std::cell::RefCell;
 use std::ops::RangeInclusive;
@@ -96,6 +96,10 @@ struct App {
     midi: Arc<Mutex<MidiState>>,
     range: RangeInclusive<u8>,
     preview: Preview,
+    /// The options window is open.
+    options_open: bool,
+    /// Its size at the last frame: a desktop that resizes it gets it repainted.
+    options_size: Option<egui::Rect>,
 }
 
 fn midi_state(c: &MidiChange) -> MidiState {
@@ -151,11 +155,14 @@ impl App {
             midi,
             range: keyboard::DEFAULT_RANGE,
             preview: Preview::default(),
+            options_open: false,
+            options_size: None,
         }
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, &mut self.preview);
+        let options = &mut self.options_open;
         let metronome = session.map(|s| Arc::clone(s.metronome()));
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
         egui::Sides::new().shrink_left().truncate().show(
@@ -165,7 +172,7 @@ impl App {
                 ui.separator();
                 let section = |label| session.and_then(|s| s.section(label));
                 let short = |label| section(label).map_or("none", |s: &Section| s.short.as_str());
-                item(ui, "Instrument", short("plugin"), None, section("plugin"));
+                item(ui, "Instrument", &shorten(short("plugin")), None, section("plugin"));
 
                 let midi = midi.lock().unwrap_or_else(PoisonError::into_inner).clone();
                 let (text, dot) = match &midi {
@@ -173,7 +180,7 @@ impl App {
                     MidiState::Waiting => ("plug in a keyboard".to_string(), Color32::GRAY),
                     MidiState::Failed(e) => (e.clone(), Color32::from_rgb(239, 68, 68)),
                 };
-                item(ui, "MIDI", &text, Some(dot), section("MIDI in"));
+                item(ui, "MIDI", &shorten(&text), Some(dot), section("MIDI in"));
                 // Always there, lit while the pedal is down: the layout does not move.
                 let pedal = if keys.sustain() {
                     Color32::from_rgb(251, 191, 36)
@@ -187,6 +194,9 @@ impl App {
                 }
             },
             |ui| {
+                ui.toggle_value(options, "Options")
+                    .on_hover_text("Click sound and volume, in a window of its own");
+                ui.separator();
                 egui::ComboBox::from_id_salt("scale")
                     .selected_text(format!("Fingering: {}", preview.name()))
                     .show_ui(ui, |ui| {
@@ -202,6 +212,40 @@ impl App {
                 }
             },
         );
+    }
+
+    /// The options, in a window of their own: the plugin's editor covers anything drawn over
+    /// the main window.
+    fn options_window(&mut self, ctx: &egui::Context) {
+        let metronome = self.session.as_ref().map(|s| Arc::clone(s.metronome()));
+        let builder = egui::ViewportBuilder::default()
+            .with_title("onezan options")
+            .with_app_id("onezan")
+            .with_inner_size([340.0, 200.0]);
+        let size = &mut self.options_size;
+        let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("options"), builder, |ui, _| {
+            let now = ui.ctx().input(|i| i.viewport().inner_rect);
+            if now != *size {
+                // Tiling desktops resize new windows at once; seen once without a repaint.
+                *size = now;
+                ui.ctx().request_repaint();
+            }
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.heading("Metronome");
+                ui.add_space(6.0);
+                match &metronome {
+                    Some(m) => metronome_options(ui, m),
+                    None => {
+                        ui.label("No audio: nothing to set.");
+                    }
+                }
+            });
+            ui.ctx().input(|i| i.viewport().close_requested())
+        });
+        if close {
+            self.options_open = false;
+            self.options_size = None;
+        }
     }
 
     /// The middle: the plugin's editor, embedded at the first frame and kept in place.
@@ -274,7 +318,7 @@ impl App {
 }
 
 /// The metronome's controls, right to left (the bar's right side is laid out that way): the
-/// tempo, then the switch.
+/// tempo, then the switch. Its sound and volume are in the options window.
 fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
     let mut bpm = m.bpm();
     let r = ui
@@ -291,6 +335,55 @@ fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
     {
         m.set_on(on);
     }
+}
+
+/// The metronome's sound and volume. Changing either plays a sample click.
+fn metronome_options(ui: &mut egui::Ui, m: &Metronome) {
+    egui::Grid::new("metronome options")
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("Volume");
+            let mut volume = m.volume();
+            let r = ui.add(
+                egui::Slider::new(&mut volume, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
+                    .custom_parser(|t| t.trim_end_matches(['%', ' ']).parse::<f64>().ok().map(|v| v / 100.0)),
+            );
+            if r.changed() {
+                m.set_volume(volume);
+            }
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                m.play_sample();
+            }
+            ui.end_row();
+
+            ui.label("Sound");
+            ui.horizontal(|ui| {
+                let mut click = m.click();
+                for c in Click::ALL {
+                    if ui.radio_value(&mut click, c, c.name()).clicked() {
+                        m.set_click(c);
+                        m.play_sample();
+                    }
+                }
+            });
+            ui.end_row();
+        });
+}
+
+/// How many characters of a device or plugin name the bar shows.
+const NAME_CHARS: usize = 24;
+
+/// `name` cut to [`NAME_CHARS`], with "…" when it was longer (the full name is in the hover
+/// report).
+fn shorten(name: &str) -> String {
+    if name.chars().count() <= NAME_CHARS {
+        return name.to_string();
+    }
+    let mut s: String = name.chars().take(NAME_CHARS.saturating_sub(1)).collect();
+    s.push('…');
+    s
 }
 
 /// One item of the top bar: "Label value", with the report's reasons on hover.
@@ -354,6 +447,9 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.options_open {
+            self.options_window(ui.ctx());
+        }
         // Bottom panels stack upwards: the keyboard at the very bottom, the bar above it.
         egui::Panel::bottom("keyboard")
             .exact_size(200.0)
@@ -405,4 +501,21 @@ fn to_u32(v: f32) -> u32 {
 
 fn to_u16(n: u32) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_names_are_cut_with_an_ellipsis() {
+        assert_eq!(shorten("Surge XT"), "Surge XT");
+        let exact = "x".repeat(NAME_CHARS);
+        assert_eq!(shorten(&exact), exact);
+        let long = shorten("Midi Through:Midi Through Port-0 14:0");
+        assert_eq!(long.chars().count(), NAME_CHARS);
+        assert!(long.ends_with('…'));
+        // Characters, not bytes: no panic in the middle of a multi-byte one.
+        assert_eq!(shorten(&"ö".repeat(30)).chars().count(), NAME_CHARS);
+    }
 }

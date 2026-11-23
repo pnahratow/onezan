@@ -21,7 +21,7 @@ mod report;
 pub mod timing;
 
 pub use audio_out::{AudioOut, REQUESTED_FRAMES, request_low_latency};
-pub use metronome::Metronome;
+pub use metronome::{Click, Metronome};
 pub use midi_in::{Keys, MidiChange, MidiWatch, choose_midi_port, midi_input_ports};
 pub use offline::render_offline;
 pub use report::{Considered, Verdict};

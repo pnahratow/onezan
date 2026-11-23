@@ -5,10 +5,60 @@
 //! callback: it counts frames to the next beat and mixes a short click into the output after the
 //! plugin.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 pub const MIN_BPM: u32 = 20;
 pub const MAX_BPM: u32 = 300;
+
+/// The click's sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Click {
+    /// A short, bright tick.
+    #[default]
+    Tick,
+    /// A hollow knock, like a woodblock.
+    Wood,
+    /// A longer, soft beep.
+    Beep,
+}
+
+impl Click {
+    pub const ALL: [Self; 3] = [Self::Tick, Self::Wood, Self::Beep];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tick => "Tick",
+            Self::Wood => "Woodblock",
+            Self::Beep => "Beep",
+        }
+    }
+
+    /// Two partials: (frequency in Hz, gain, decay time constant in seconds).
+    const fn partials(self) -> [(f32, f32, f32); 2] {
+        match self {
+            Self::Tick => [(1_500.0, 1.0, 0.012), (4_500.0, 0.25, 0.003)],
+            Self::Wood => [(820.0, 1.0, 0.025), (2_150.0, 0.5, 0.008)],
+            Self::Beep => [(1_000.0, 0.8, 0.03), (2_000.0, 0.1, 0.015)],
+        }
+    }
+
+    const fn index(self) -> u8 {
+        match self {
+            Self::Tick => 0,
+            Self::Wood => 1,
+            Self::Beep => 2,
+        }
+    }
+
+    const fn from_index(i: u8) -> Self {
+        match i {
+            1 => Self::Wood,
+            2 => Self::Beep,
+            _ => Self::Tick,
+        }
+    }
+}
 
 /// The metronome's settings, shared by the app and the audio callback.
 pub struct Metronome {
@@ -16,6 +66,9 @@ pub struct Metronome {
     bpm: AtomicU32,
     /// 0.0 to 1.0, as `f32` bits.
     volume: AtomicU32,
+    click: AtomicU8,
+    /// One click to play now (to try a sound), metronome on or off.
+    sample: AtomicBool,
 }
 
 impl Default for Metronome {
@@ -24,6 +77,8 @@ impl Default for Metronome {
             on: AtomicBool::new(false),
             bpm: AtomicU32::new(100),
             volume: AtomicU32::new(0.6f32.to_bits()),
+            click: AtomicU8::new(Click::Tick.index()),
+            sample: AtomicBool::new(false),
         }
     }
 }
@@ -63,22 +118,55 @@ impl Metronome {
         };
         self.volume.store(v.to_bits(), Ordering::Relaxed);
     }
+
+    #[must_use]
+    pub fn click(&self) -> Click {
+        Click::from_index(self.click.load(Ordering::Relaxed))
+    }
+
+    pub fn set_click(&self, click: Click) {
+        self.click.store(click.index(), Ordering::Relaxed);
+    }
+
+    /// Plays one click now, with the current sound and volume (to try them).
+    pub fn play_sample(&self) {
+        self.sample.store(true, Ordering::Relaxed);
+    }
 }
 
-/// How a click sounds: a decaying sine starting at its peak (a sharp, short tick).
-const CLICK_HZ: f32 = 1_500.0;
-/// Decay time constant, and the level below which a click has ended.
-const DECAY: f32 = 0.012;
+/// The level below which a click has ended, relative to full volume.
 const SILENT: f32 = 0.001;
 /// Headroom: the click at full volume stays well under full scale next to the plugin.
 const LEVEL: f32 = 0.5;
 
-/// One sounding click.
-struct Voice {
+/// One decaying sine, starting at its peak.
+struct Partial {
     phase: f32,
     step: f32,
     level: f32,
     decay: f32,
+}
+
+impl Partial {
+    fn next(&mut self) -> f32 {
+        let s = self.phase.cos() * self.level;
+        self.phase = (self.phase + self.step) % std::f32::consts::TAU;
+        self.level *= self.decay;
+        s
+    }
+}
+
+/// One sounding click.
+struct Voice([Partial; 2]);
+
+impl Voice {
+    fn next(&mut self) -> f32 {
+        self.0.iter_mut().map(Partial::next).sum()
+    }
+
+    fn ended(&self) -> bool {
+        self.0.iter().all(|p| p.level.abs() < SILENT * LEVEL)
+    }
 }
 
 /// The audio-thread half: counts frames to the next beat and makes the clicks.
@@ -110,42 +198,44 @@ impl Clicker {
             self.until_next = 0.0;
         }
         self.was_on = on;
+        if m.sample.swap(false, Ordering::Relaxed) {
+            self.voice = Some(self.voice(m));
+        }
         if !on && self.voice.is_none() {
             return;
         }
         let period = self.rate * 60.0 / f64::from(m.bpm().clamp(MIN_BPM, MAX_BPM));
-        let volume = m.volume() * LEVEL;
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             if on {
                 if self.until_next <= 0.0 {
-                    self.voice = Some(self.voice(volume));
+                    self.voice = Some(self.voice(m));
                     self.until_next += period;
                 }
                 self.until_next -= 1.0;
             }
             if let Some(v) = &mut self.voice {
-                let s = v.phase.cos() * v.level;
+                let s = v.next();
                 *l += s;
                 *r += s;
-                v.phase = (v.phase + v.step) % std::f32::consts::TAU;
-                v.level *= v.decay;
-                if v.level < SILENT * LEVEL {
+                if v.ended() {
                     self.voice = None;
                 }
             }
         }
     }
 
-    fn voice(&self, volume: f32) -> Voice {
+    /// A click with the metronome's current sound and volume.
+    fn voice(&self, m: &Metronome) -> Voice {
         #[expect(clippy::cast_possible_truncation, reason = "a sample rate fits an f32 well enough")]
         #[expect(clippy::as_conversions, reason = "no as-free f64 to f32 conversion")]
         let rate = self.rate as f32;
-        Voice {
+        let volume = m.volume() * LEVEL;
+        Voice(m.click().partials().map(|(hz, gain, decay)| Partial {
             phase: 0.0,
-            step: std::f32::consts::TAU * CLICK_HZ / rate,
-            level: volume,
-            decay: (-1.0 / (DECAY * rate)).exp(),
-        }
+            step: std::f32::consts::TAU * hz / rate,
+            level: gain * volume,
+            decay: (-1.0 / (decay * rate)).exp(),
+        }))
     }
 }
 
@@ -219,6 +309,48 @@ mod tests {
         m.set_on(false);
         let tail = render(&m, &mut c, 48_000, 256);
         assert!(tail.iter().skip(10_000).all(|x| *x == 0.0), "rings out, then silence");
+    }
+
+    #[test]
+    fn volume_scales_the_click() {
+        let peak = |volume: f32| {
+            let m = on_at(120);
+            m.set_volume(volume);
+            let s = render(&m, &mut Clicker::new(RATE), 1000, 256);
+            s.iter().fold(0.0f32, |p, x| p.max(x.abs()))
+        };
+        assert!(peak(0.0) < f32::EPSILON, "silent at 0");
+        assert!(
+            (peak(0.5) / peak(1.0) - 0.5).abs() < 0.01,
+            "half the level at half volume"
+        );
+    }
+
+    #[test]
+    fn every_sound_clicks_briefly_and_they_differ() {
+        let mut heard = Vec::new();
+        for click in Click::ALL {
+            let m = on_at(60);
+            m.set_click(click);
+            let s = render(&m, &mut Clicker::new(RATE), 24_000, 256);
+            let end = s.iter().rposition(|x| x.abs() > 1e-6).unwrap();
+            assert!(end > 100 && end < 24_000 / 2, "{click:?} ends after {end} frames");
+            heard.push(s[..200].to_vec());
+        }
+        assert!(heard[0] != heard[1] && heard[1] != heard[2] && heard[0] != heard[2]);
+    }
+
+    #[test]
+    fn a_sample_click_plays_while_off() {
+        let m = Metronome::default();
+        let mut c = Clicker::new(RATE);
+        m.play_sample();
+        let s = render(&m, &mut c, 24_000, 256);
+        assert_eq!(onsets(&s), [0], "one click");
+        assert!(
+            render(&m, &mut c, 24_000, 256).iter().all(|x| *x == 0.0),
+            "and only one"
+        );
     }
 
     #[test]

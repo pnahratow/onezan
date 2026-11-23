@@ -211,7 +211,12 @@ works on any GL driver (the VM has only llvmpipe).
 - **Layout, top to bottom**: the plugin's editor, the status bar, the keyboard. The editor is a
   native window over ours, so nothing egui draws can show over it (menus and tooltips vanished
   behind it on the user's host); with the bar below it they open over the keyboard instead.
-- **Status bar**: instrument, MIDI port (green dot when connected; "plug in a keyboard" otherwise;
+- **Options window**: the "Options" button at the bar's right opens a window of its own (an egui
+  immediate viewport, a real OS window: the plugin's editor would cover anything drawn inside
+  the main window). It holds the metronome's volume and sound. It is repainted when the desktop
+  resizes it (a tiling desktop does so at once; once it stayed white without that).
+- **Status bar**: instrument and MIDI names cut to 24 characters with "…" (full names in the
+  hover report), MIDI port (green dot when connected; "plug in a keyboard" otherwise;
   live), a pedal LED (amber while sustain is down; always there, so nothing moves), audio
   backend and block length, timing mode. Hovering an
   item shows the startup report for it (what was chosen, why, the alternatives). On the right,
@@ -279,18 +284,21 @@ The middle of the window shows the plugin's own editor (`IPlugView`), embedded.
 
 `crates/engine/src/metronome.rs`. The clicks are made inside the audio callback, after the
 plugin, so every beat lands on its exact sample whatever the block size or UI load (never UI
-timers). The beat position is kept as a fractional frame count, so odd tempos do not drift. A
-click is a 1500 Hz sine starting at its peak, decaying in about 12 ms; every click is the same.
+timers). The beat position is kept as a fractional frame count, so odd tempos do not drift.
+Every click is the same. Three sounds, each two decaying sines starting at their peak: Tick
+(1500 Hz, bright, 12 ms), Woodblock (820 Hz, hollow knock), Beep (1000 Hz, longer, fades within
+about 0.2 s so it fits 300 BPM).
 
-- `Metronome` (shared, atomics): on/off, BPM (20 to 300), volume (no control in the window yet).
+- `Metronome` (shared, atomics): on/off, BPM (20 to 300), volume (0 to 1, linear; default 0.6),
+  sound, and `play_sample()` (one click now, metronome on or off, to try a sound).
 - Window: in the status bar's right part, a "Metronome" switch and a BPM field (drag, scroll or
-  type). Space starts and stops it. On purpose nothing more: the user wants no beats per bar,
+  type). Volume and sound are in the options window; changing either plays a sample click. Space starts and stops it. On purpose nothing more: the user wants no beats per bar,
   accents or beat LEDs (an earlier version had them).
 - `onezan play --metronome BPM` and `onezan gui --metronome BPM` start it at that tempo.
 - Checked: unit tests (beats on their sample for blocks of 64 to 4096 frames, no drift at 70
   BPM, off/on), and recordings of the system output: clicks exactly 500.0 ms apart at 120 BPM
-  and 666.7 ms at 90, all the same level.
-- Not yet: the tempo is not saved between starts.
+  and 666.7 ms at 90, all the same level. A unit test checks the volume scales the click.
+- Not yet: tempo and volume are not saved between starts.
 
 ## Lints (2026-11-23)
 
