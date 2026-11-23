@@ -3,6 +3,7 @@
 
 use crate::MAX_FRAMES;
 use crate::callback::{APPLIED_EXACT, APPLIED_IMMEDIATE, Callback, Report};
+use crate::metronome::Metronome;
 use crate::report::{Considered, Verdict};
 use crate::timing::{self, MidiTiming, TimedEvent};
 use anyhow::{Context, Result};
@@ -184,13 +185,19 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 
 impl AudioOut {
     /// Opens the best output (see [`pick_output`]), starts `plugin` at its sample rate and plays
-    /// it, feeding it the events from `inputs`, placed in each block as `timing` says.
+    /// it, feeding it the events from `inputs`, placed in each block as `timing` says, with the
+    /// clicks of `metronome` mixed in.
     ///
     /// # Errors
     ///
     /// When there is no usable output device (32-bit float), the plugin cannot start, or the
     /// stream cannot be opened.
-    pub fn start(plugin: &mut Plugin, inputs: Vec<Consumer<TimedEvent>>, timing: MidiTiming) -> Result<Self> {
+    pub fn start(
+        plugin: &mut Plugin,
+        inputs: Vec<Consumer<TimedEvent>>,
+        timing: MidiTiming,
+        metronome: Arc<Metronome>,
+    ) -> Result<Self> {
         let (host_id, device, considered) = pick_output()?;
         let device_name = device.name().unwrap_or_else(|_| "unknown device".into());
         let supported = pick_config(&device)?;
@@ -212,7 +219,7 @@ impl AudioOut {
             block: block.clone(),
             applied: applied.clone(),
         };
-        let mut cb = Callback::new(processor, inputs, channels, sample_rate.0, timing, report);
+        let mut cb = Callback::new(processor, inputs, channels, sample_rate.0, timing, report, metronome);
         let stream = device
             .build_output_stream(
                 &config,

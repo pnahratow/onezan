@@ -38,6 +38,7 @@ cargo run --release -- midi            # MIDI input ports
 cargo run --release -- play            # without the window
 cargo run --release -- play "Surge XT" --midi "Keystation"
 cargo run --release -- play --demo     # plays a C major scale through the plugin
+cargo run --release -- play --metronome 90   # with the metronome (the window has it too)
 cargo run --release -- render          # offline render check, no audio device needed
 ```
 

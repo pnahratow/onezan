@@ -56,6 +56,9 @@ enum Cmd {
         midi: Option<String>,
         #[arg(long, value_enum, default_value_t = Timing::Auto)]
         midi_timing: Timing,
+        /// Start the metronome at this many beats per minute.
+        #[arg(long, value_name = "BPM")]
+        metronome: Option<u32>,
     },
     /// List installed VST3 plugins (instruments only unless --all).
     List {
@@ -78,6 +81,9 @@ enum Cmd {
         /// immediate (next block, uneven), or auto (exact for short blocks).
         #[arg(long, value_enum, default_value_t = Timing::Auto)]
         midi_timing: Timing,
+        /// Start the metronome at this many beats per minute.
+        #[arg(long, value_name = "BPM")]
+        metronome: Option<u32>,
     },
     /// Render a C major scale offline and report the output level (no audio device needed).
     Render {
@@ -96,15 +102,18 @@ fn main() -> Result<()> {
             plugin: None,
             midi: None,
             timing: MidiTiming::Auto,
+            metronome: None,
         }),
         Some(Cmd::Gui {
             plugin,
             midi,
             midi_timing,
+            metronome,
         }) => gui::run(Options {
             plugin,
             midi,
             timing: midi_timing.into(),
+            metronome,
         }),
         Some(Cmd::List { all }) => {
             list(all);
@@ -125,7 +134,16 @@ fn main() -> Result<()> {
             midi,
             demo,
             midi_timing,
-        }) => play(plugin.as_deref(), midi.as_deref(), demo, midi_timing.into()),
+            metronome,
+        }) => play(
+            &Options {
+                plugin,
+                midi,
+                timing: midi_timing.into(),
+                metronome,
+            },
+            demo,
+        ),
         Some(Cmd::Render { plugin, sample_rate }) => render(plugin.as_deref(), sample_rate),
     }
 }
@@ -155,17 +173,15 @@ fn list(all: bool) {
 /// C major, one octave up and down, from middle C.
 const SCALE: [u8; 15] = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60];
 
-fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool, timing: MidiTiming) -> Result<()> {
-    let opts = Options {
-        plugin: plugin_arg.map(String::from),
-        midi: midi_arg.map(String::from),
-        timing,
-    };
+fn play(opts: &Options, demo: bool) -> Result<()> {
     let (demo_tx, demo_rx) = midi_queue();
-    let session = Session::start(&opts, vec![demo_rx], std::sync::Arc::default(), |c| {
+    let session = Session::start(opts, vec![demo_rx], std::sync::Arc::default(), |c| {
         println!("{:<10}{}", "MIDI in", midi_change(&c));
     })?;
     print_report(&session);
+    if opts.metronome.is_some() {
+        println!("{:<10}{} BPM", "metronome", session.metronome().bpm());
+    }
 
     let demo_thread = demo.then(|| std::thread::spawn(move || play_scale(demo_tx)));
     if let Some(t) = demo_thread {

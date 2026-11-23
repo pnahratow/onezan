@@ -1,6 +1,7 @@
 //! The audio callback: drains the MIDI queues, places each event in the block (see
 //! [`crate::timing`]) and runs the plugin. Allocates nothing and takes no locks.
 
+use crate::metronome::{Clicker, Metronome};
 use crate::timing::{self, MidiTiming, TimedEvent};
 use crate::{MAX_CALLBACK_FRAMES, QUEUE_CAP};
 use onezan_vst3_host::{MidiEvent, Processor};
@@ -37,6 +38,8 @@ pub struct Callback {
     prev: Option<Instant>,
     report: Report,
     callbacks: u32,
+    metronome: Arc<Metronome>,
+    clicker: Clicker,
 }
 
 /// Callbacks before the block size is reported: the first ones can be one-off large chunks
@@ -51,6 +54,7 @@ impl Callback {
         rate: u32,
         timing: MidiTiming,
         report: Report,
+        metronome: Arc<Metronome>,
     ) -> Self {
         Self {
             processor,
@@ -65,6 +69,8 @@ impl Callback {
             prev: None,
             report,
             callbacks: 0,
+            metronome,
+            clicker: Clicker::new(rate),
         }
     }
 
@@ -117,6 +123,7 @@ impl Callback {
                     .map(|&(at, ev)| (at.saturating_sub(start), ev)),
             );
             self.processor.process(&self.part_events, l, r);
+            self.clicker.render(&self.metronome, l, r);
             start = end;
             for ((frame, &lv), &rv) in chunk.chunks_mut(ch).zip(l.iter()).zip(r.iter()) {
                 match frame {

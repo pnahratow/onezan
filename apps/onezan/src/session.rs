@@ -4,7 +4,9 @@
 use crate::plugins::load;
 use anyhow::Result;
 use onezan_engine::midi_in::POLL;
-use onezan_engine::{AudioOut, Considered, Consumer, Keys, MidiChange, MidiTiming, MidiWatch, TimedEvent, midi_queue};
+use onezan_engine::{
+    AudioOut, Considered, Consumer, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, TimedEvent, midi_queue,
+};
 use onezan_vst3_host::Plugin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +16,8 @@ pub struct Options {
     pub plugin: Option<String>,
     pub midi: Option<String>,
     pub timing: MidiTiming,
+    /// Start the metronome at this tempo.
+    pub metronome: Option<u32>,
 }
 
 /// One section of the startup report: what was considered, a detail for the one in use, and
@@ -31,6 +35,7 @@ pub struct Session {
     // Dropped in this order: MIDI input, then audio (and the plugin's processor), then the plugin.
     watch: Option<MidiWatch>,
     audio: Option<AudioOut>,
+    metronome: Arc<Metronome>,
     plugin: Plugin,
     /// The startup report: plugin, MIDI in, audio out, timing.
     pub report: Vec<Section>,
@@ -66,7 +71,12 @@ impl Session {
         });
         let mut inputs = vec![midi_rx];
         inputs.extend(extra);
-        let audio = AudioOut::start(&mut plugin, inputs, opts.timing)?;
+        let metronome = Arc::new(Metronome::default());
+        if let Some(bpm) = opts.metronome {
+            metronome.set_bpm(bpm);
+            metronome.set_on(true);
+        }
+        let audio = AudioOut::start(&mut plugin, inputs, opts.timing, Arc::clone(&metronome))?;
         report.push(Section {
             label: "audio out",
             considered: audio.considered.clone(),
@@ -86,10 +96,16 @@ impl Session {
         Ok(Self {
             watch: Some(watch),
             audio: Some(audio),
+            metronome,
             plugin,
             report,
             first_midi,
         })
+    }
+
+    /// The metronome's settings (any thread).
+    pub const fn metronome(&self) -> &Arc<Metronome> {
+        &self.metronome
     }
 
     pub const fn plugin(&self) -> &Plugin {

@@ -8,17 +8,20 @@
 //! - `audio_out`: picks the output with the lowest latency and opens the stream.
 //! - `callback`: the audio callback (no allocation, no locks).
 //! - `timing`: where in a block each live event plays.
+//! - `metronome`: clicks made in the audio callback, on their exact sample.
 //! - `report`: what was considered for each input and output, and why.
 //! - `offline`: rendering without an audio device, for checks.
 
 mod audio_out;
 mod callback;
+pub mod metronome;
 pub mod midi_in;
 mod offline;
 mod report;
 pub mod timing;
 
 pub use audio_out::{AudioOut, REQUESTED_FRAMES, request_low_latency};
+pub use metronome::Metronome;
 pub use midi_in::{Keys, MidiChange, MidiWatch, choose_midi_port, midi_input_ports};
 pub use offline::render_offline;
 pub use report::{Considered, Verdict};

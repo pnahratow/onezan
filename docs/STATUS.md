@@ -68,6 +68,7 @@ crates/engine/          onezan-engine: MIDI in, audio out, timing
   audio_out.rs          pick_output (JACK, else default), request_low_latency, AudioOut
   callback.rs           the audio callback: drain queues, place events, run the plugin
   timing.rs             exact vs. immediate placement of live MIDI in a block
+  metronome.rs          Metronome (settings, atomics), Clicker (clicks in the callback)
   report.rs             Considered / Verdict: what was considered and why (startup report)
   offline.rs            render_offline (checks without an audio device)
   tests/                plugin.rs (offline, against a real plugin), midi_hotplug.rs (virtual port)
@@ -121,7 +122,7 @@ Commit only when the user asks.
    with setComponentState after loading; save the chosen plugin and its state to a config file.
 5. Choosing instrument and MIDI port in the window (optional overrides; the automatic choice
    stays the default).
-6. Later: a metronome (generated inside the audio callback, sample-accurate), CLAP via
+6. Later: CLAP via
    `clack-host`, a built-in SoundFont fallback (`rustysynth`), the scale and fingering data, a
    learning order, and progress in SQLite (store raw note events).
 
@@ -273,6 +274,23 @@ The middle of the window shows the plugin's own editor (`IPlugView`), embedded.
 - Not done or not checked: Windows (stub, the middle shows a note); mouse and keyboard in the
   editor (the VM cannot send real input); under fractional scaling XWayland windows are scaled
   by the desktop and may look soft; keyboard focus inside the editor.
+
+## Metronome (2026-11-23)
+
+`crates/engine/src/metronome.rs`. The clicks are made inside the audio callback, after the
+plugin, so every beat lands on its exact sample whatever the block size or UI load (never UI
+timers). The beat position is kept as a fractional frame count, so odd tempos do not drift. A
+click is a 1500 Hz sine starting at its peak, decaying in about 12 ms; every click is the same.
+
+- `Metronome` (shared, atomics): on/off, BPM (20 to 300), volume (no control in the window yet).
+- Window: in the status bar's right part, a "Metronome" switch and a BPM field (drag, scroll or
+  type). Space starts and stops it. On purpose nothing more: the user wants no beats per bar,
+  accents or beat LEDs (an earlier version had them).
+- `onezan play --metronome BPM` and `onezan gui --metronome BPM` start it at that tempo.
+- Checked: unit tests (beats on their sample for blocks of 64 to 4096 frames, no drift at 70
+  BPM, off/on), and recordings of the system output: clicks exactly 500.0 ms apart at 120 BPM
+  and 666.7 ms at 90, all the same level.
+- Not yet: the tempo is not saved between starts.
 
 ## Lints (2026-11-23)
 

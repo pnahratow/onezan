@@ -11,7 +11,8 @@ use crate::keyboard::{self, KeyLook};
 use crate::session::{Options, Section, Session};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
-use onezan_engine::{Keys, MidiChange, Verdict};
+use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
+use onezan_engine::{Keys, Metronome, MidiChange, Verdict};
 use onezan_vst3_host::Editor;
 use std::cell::RefCell;
 use std::ops::RangeInclusive;
@@ -155,6 +156,7 @@ impl App {
 
     fn bar(&mut self, ui: &mut egui::Ui) {
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, &mut self.preview);
+        let metronome = session.map(|s| Arc::clone(s.metronome()));
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
         egui::Sides::new().shrink_left().truncate().show(
             ui,
@@ -194,6 +196,10 @@ impl App {
                     })
                     .response
                     .on_hover_text("Which scale fingering the keyboard shows");
+                if let Some(m) = &metronome {
+                    ui.separator();
+                    metronome_controls(ui, m);
+                }
             },
         );
     }
@@ -267,6 +273,26 @@ impl App {
     }
 }
 
+/// The metronome's controls, right to left (the bar's right side is laid out that way): the
+/// tempo, then the switch.
+fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
+    let mut bpm = m.bpm();
+    let r = ui
+        .add(egui::DragValue::new(&mut bpm).range(MIN_BPM..=MAX_BPM).suffix(" BPM"))
+        .on_hover_text("Tempo: drag, scroll or type");
+    if r.changed() {
+        m.set_bpm(bpm);
+    }
+    let mut on = m.is_on();
+    if ui
+        .toggle_value(&mut on, "Metronome")
+        .on_hover_text("Start or stop the metronome (Space)")
+        .clicked()
+    {
+        m.set_on(on);
+    }
+}
+
 /// One item of the top bar: "Label value", with the report's reasons on hover.
 fn item(ui: &mut egui::Ui, label: &str, value: &str, dot: Option<Color32>, why: Option<&Section>) {
     let r = ui
@@ -308,6 +334,14 @@ fn explain(s: &Section) -> String {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Space starts and stops the metronome, unless a text field has the keyboard.
+        if ctx.input(|i| i.key_pressed(egui::Key::Space))
+            && !ctx.egui_wants_keyboard_input()
+            && let Some(m) = self.session.as_ref().map(Session::metronome)
+        {
+            m.set_on(!m.is_on());
+            ctx.request_repaint();
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             // The editor goes while its window is still there.
             drop(self.embedded.borrow_mut().take());
