@@ -13,6 +13,8 @@
 //!    one, matching where the hands are on the piano.
 //!
 //! C keys carry their octave name (C4 is middle C) at the very front.
+//!
+//! The keys can be played with the mouse: [`show`] says which key the pointer holds down.
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use std::ops::RangeInclusive;
@@ -63,25 +65,86 @@ fn f(n: usize) -> f32 {
     u16::try_from(n).map_or(f32::MAX, f32::from)
 }
 
-/// Draws the keys in `range` filling the available space; `look` says how each key looks.
-pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook) {
-    let (area, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-    let whites: Vec<u8> = range.clone().filter(|&k| !is_black(k)).collect();
-    if whites.is_empty() {
-        return;
+/// Where the keys of a range are, in an area.
+struct Layout {
+    whites: Vec<u8>,
+    left: f32,
+    top: f32,
+    white_w: f32,
+    height: f32,
+    black_w: f32,
+    black_h: f32,
+}
+
+impl Layout {
+    /// The keys of `range` filling `area`, sitting on its bottom edge; `None` without white keys.
+    fn new(area: Rect, range: RangeInclusive<u8>) -> Option<Self> {
+        let whites: Vec<u8> = range.filter(|&k| !is_black(k)).collect();
+        if whites.is_empty() {
+            return None;
+        }
+        let white_w = area.width() / f(whites.len());
+        let height = area.height().min(white_w * 6.5);
+        Some(Self {
+            whites,
+            left: area.left(),
+            top: area.bottom() - height,
+            white_w,
+            height,
+            black_w: white_w * 0.6,
+            black_h: height * 0.62,
+        })
     }
-    let white_w = area.width() / f(whites.len());
-    let height = area.height().min(white_w * 6.5);
-    let top = area.bottom() - height;
-    let black_w = white_w * 0.6;
-    let black_h = height * 0.62;
-    let badge_r = (white_w * 0.34).clamp(6.0, 12.0);
+
+    /// The white keys with their rectangles, left to right.
+    fn white_keys(&self) -> impl Iterator<Item = (u8, Rect)> + '_ {
+        self.whites.iter().enumerate().map(|(i, &key)| {
+            let x = self.white_w.mul_add(f(i), self.left);
+            (
+                key,
+                Rect::from_min_size(pos2(x, self.top), vec2(self.white_w, self.height)),
+            )
+        })
+    }
+
+    /// The black key `key`'s rectangle, if it has a white key below it in the range.
+    fn black_rect(&self, key: u8) -> Option<Rect> {
+        // A black key sits on the line between the white key below it and the next one.
+        let below = key
+            .checked_sub(1)
+            .and_then(|b| self.whites.iter().position(|&w| w == b))?;
+        let line = self.white_w.mul_add(f(below.saturating_add(1)), self.left);
+        Some(Rect::from_min_size(
+            pos2(line - self.black_w / 2.0, self.top),
+            vec2(self.black_w, self.black_h),
+        ))
+    }
+
+    /// The key at `pos`: black keys lie over the white ones.
+    fn key_at(&self, range: RangeInclusive<u8>, pos: Pos2) -> Option<u8> {
+        range
+            .filter(|&k| is_black(k))
+            .find(|&k| self.black_rect(k).is_some_and(|r| r.contains(pos)))
+            .or_else(|| self.white_keys().find(|(_, r)| r.contains(pos)).map(|(k, _)| k))
+    }
+}
+
+/// Draws the keys in `range` filling the available space; `look` says how each key looks.
+/// Returns the key the mouse holds down, if any (dragging slides from key to key).
+pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook) -> Option<u8> {
+    let (area, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+    let layout = Layout::new(area, range.clone())?;
+    let held = response
+        .is_pointer_button_down_on()
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .and_then(|pos| layout.key_at(range.clone(), pos));
+    let (height, black_w) = (layout.height, layout.black_w);
+    let badge_r = (layout.white_w * 0.34).clamp(6.0, 12.0);
     let label_h = (height * 0.1).clamp(9.0, 14.0);
     let painter = ui.painter_at(area);
 
-    for (i, &key) in whites.iter().enumerate() {
-        let x = white_w.mul_add(f(i), area.left());
-        let rect = Rect::from_min_size(pos2(x, top), vec2(white_w, height));
+    for (key, rect) in layout.white_keys() {
         let l = look(key);
         let base = if l.in_scale { WHITE_IN_SCALE } else { WHITE };
         face(
@@ -108,18 +171,14 @@ pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook
     }
 
     for key in range.filter(|&k| is_black(k)) {
-        // A black key sits on the line between the white key below it and the next one.
-        let Some(below) = key.checked_sub(1).and_then(|b| whites.iter().position(|&w| w == b)) else {
-            continue;
-        };
-        let line = white_w.mul_add(f(below.saturating_add(1)), area.left());
-        let rect = Rect::from_min_size(pos2(line - black_w / 2.0, top), vec2(black_w, black_h));
+        let Some(rect) = layout.black_rect(key) else { continue };
         let l = look(key);
         let base = if l.in_scale { BLACK_IN_SCALE } else { BLACK };
         face(&painter, rect, 2.0, base, (BLACK_PRESSED, BLACK_METER), l.velocity);
         let r = badge_r.min(black_w * 0.45);
         badges(&painter, rect.center().x, rect.bottom() - r - 3.0, r, l);
     }
+    held
 }
 
 /// A key's surface: `base`, or when pressed the tint of `pressed` with its meter colour rising
@@ -188,6 +247,24 @@ mod tests {
     fn default_range_is_49_keys_with_29_white() {
         assert_eq!(DEFAULT_RANGE.clone().count(), 49);
         assert_eq!(DEFAULT_RANGE.clone().filter(|&k| !is_black(k)).count(), 29);
+    }
+
+    #[test]
+    fn the_mouse_finds_the_key_under_it() {
+        // One octave, C4 to B4: 7 white keys, 70 px each, 300 px high.
+        let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(490.0, 300.0));
+        let layout = Layout::new(area, 60..=71).unwrap();
+        let at = |x, y| layout.key_at(60..=71, pos2(x, y));
+        // Low down, only white keys: C, D, ..., B.
+        assert_eq!(at(10.0, 290.0), Some(60));
+        assert_eq!(at(80.0, 290.0), Some(62));
+        assert_eq!(at(480.0, 290.0), Some(71));
+        // High up, on the line between C and D: C#, which lies over both.
+        assert_eq!(at(70.0, 50.0), Some(61));
+        // Between E and F there is no black key.
+        assert_eq!(at(210.0, 50.0), Some(64));
+        assert_eq!(at(215.0, 50.0), Some(65));
+        assert_eq!(at(500.0, 50.0), None);
     }
 
     #[test]

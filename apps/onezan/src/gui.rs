@@ -15,8 +15,8 @@ use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
 use onezan_engine::{Click, Keys, Metronome, MidiChange, MidiTiming, Output, Verdict};
-use onezan_vst3_host::Editor;
 use onezan_vst3_host::PluginInfo;
+use onezan_vst3_host::{Editor, MidiEvent};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -143,6 +143,8 @@ struct App {
     keys: Arc<Keys>,
     midi: Arc<Mutex<MidiState>>,
     range: RangeInclusive<u8>,
+    /// The key held down with the mouse on the on-screen keyboard.
+    mouse_key: Option<u8>,
     preview: Preview,
     /// Which of the windows of their own are open.
     open: OpenWindows,
@@ -214,6 +216,7 @@ impl App {
             keys,
             midi,
             range: keyboard::DEFAULT_RANGE,
+            mouse_key: None,
             preview: settings
                 .scale
                 .as_deref()
@@ -668,18 +671,49 @@ impl App {
         // The fingering shown widens it too, but only while it is shown.
         let shown = self.preview.shown();
         let range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
-        let keys = &self.keys;
-        keyboard::show(ui, range, |key| {
+        let (keys, mouse) = (&self.keys, self.mouse_key);
+        let held = keyboard::show(ui, range, |key| {
             let (left, right) = shown.fingers(key);
             KeyLook {
-                velocity: keys.velocity(key),
+                velocity: keys
+                    .velocity(key)
+                    .or_else(|| (mouse == Some(key)).then_some(MOUSE_VELOCITY)),
                 in_scale: shown.in_scale(key),
                 left,
                 right,
             }
         });
+        self.play_mouse(held);
+    }
+
+    /// Plays the key the mouse holds on the on-screen keyboard: a note at full velocity, released
+    /// when the button goes up or the mouse slides to another key.
+    fn play_mouse(&mut self, held: Option<u8>) {
+        if held == self.mouse_key {
+            return;
+        }
+        if let Some(s) = self.session.as_mut() {
+            if let Some(key) = self.mouse_key {
+                s.play(MidiEvent::NoteOff {
+                    channel: 0,
+                    key,
+                    velocity: 64,
+                });
+            }
+            if let Some(key) = held {
+                s.play(MidiEvent::NoteOn {
+                    channel: 0,
+                    key,
+                    velocity: MOUSE_VELOCITY,
+                });
+            }
+        }
+        self.mouse_key = held;
     }
 }
+
+/// How hard a key played with the mouse is struck: full velocity.
+const MOUSE_VELOCITY: u8 = 127;
 
 /// The metronome's controls, right to left (the bar's right side is laid out that way): the
 /// tempo, then the switch. Its sound and volume are in the options window.

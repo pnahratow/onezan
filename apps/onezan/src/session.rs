@@ -5,10 +5,10 @@ use crate::plugins::load;
 use anyhow::Result;
 use onezan_engine::midi_in::POLL;
 use onezan_engine::{
-    AudioOut, Considered, Consumer, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, Output, TimedEvent, Verdict,
-    choose_midi_port, midi_queue,
+    AudioOut, Considered, Consumer, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, Output, Producer, TimedEvent,
+    Verdict, choose_midi_port, midi_queue,
 };
-use onezan_vst3_host::Plugin;
+use onezan_vst3_host::{MidiEvent, Plugin};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,6 +125,8 @@ pub struct Session {
     chosen_output: Option<Output>,
     /// The MIDI port asked for by hand; `None`: the automatic choice.
     chosen_midi: Option<String>,
+    /// Notes played on the screen (see [`Session::play`]).
+    screen: Producer<TimedEvent>,
     metronome: Arc<Metronome>,
     plugin: Plugin,
     /// The startup report: plugin, MIDI in, audio out, timing.
@@ -159,7 +161,8 @@ impl Session {
             short: String::new(),
             hint: "choose another with --midi NAME, or in the window (click MIDI)",
         });
-        let mut inputs = vec![midi_rx];
+        let (mut screen, screen_rx) = midi_queue();
+        let mut inputs = vec![midi_rx, screen_rx];
         inputs.extend(extra);
         let metronome = Arc::new(Metronome::default());
         if let Some(bpm) = opts.metronome {
@@ -182,7 +185,10 @@ impl Session {
                         log::warn!("the audio output chosen last time: {e:#}");
                         let (tx, rx) = midi_queue();
                         watch.set_queue(tx);
-                        let a = AudioOut::start(&mut plugin, vec![rx], timing, Arc::clone(&metronome), None)?;
+                        let (s, screen_rx) = midi_queue();
+                        screen = s;
+                        let inputs = vec![rx, screen_rx];
+                        let a = AudioOut::start(&mut plugin, inputs, timing, Arc::clone(&metronome), None)?;
                         (a, None)
                     }
                 }
@@ -195,6 +201,7 @@ impl Session {
             audio: Some(audio),
             chosen_output,
             chosen_midi: opts.midi.clone(),
+            screen,
             metronome,
             plugin,
             report,
@@ -229,6 +236,13 @@ impl Session {
     /// The MIDI port asked for by hand; `None`: the automatic choice.
     pub fn chosen_midi(&self) -> Option<&str> {
         self.chosen_midi.as_deref()
+    }
+
+    /// Plays `event` as if from the keyboard (the on-screen keyboard), from the next audio block.
+    /// Not shown on the keys nor recorded: that is for the MIDI keyboard.
+    pub fn play(&mut self, event: MidiEvent) {
+        // A full queue drops it; the audio thread is not keeping up anyway.
+        let _ = self.screen.push(TimedEvent::now(event));
     }
 
     /// The MIDI timing setting.
@@ -271,21 +285,23 @@ impl Session {
         if let Some(a) = self.audio.take() {
             a.stop();
         }
-        let start = |plugin: &mut Plugin, output: Option<&Output>| {
+        let start = |plugin: &mut Plugin, screen: &mut Producer<TimedEvent>, output: Option<&Output>| {
             let (tx, rx) = midi_queue();
             if let Some(w) = &self.watch {
                 w.set_queue(tx);
             }
-            AudioOut::start(plugin, vec![rx], timing, Arc::clone(&self.metronome), output)
+            let (s, screen_rx) = midi_queue();
+            *screen = s;
+            AudioOut::start(plugin, vec![rx, screen_rx], timing, Arc::clone(&self.metronome), output)
         };
-        let result = match start(&mut self.plugin, output) {
+        let result = match start(&mut self.plugin, &mut self.screen, output) {
             Ok(a) => {
                 self.audio = Some(a);
                 self.chosen_output = output.cloned();
                 Ok(())
             }
             Err(e) if output.is_some() => {
-                self.audio = Some(start(&mut self.plugin, None)?);
+                self.audio = Some(start(&mut self.plugin, &mut self.screen, None)?);
                 self.chosen_output = None;
                 Err(e)
             }

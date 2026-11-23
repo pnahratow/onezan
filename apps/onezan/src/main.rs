@@ -1,5 +1,8 @@
 //! onezan: play your MIDI keyboard through a VST3 instrument.
 
+// Windows: a GUI program, so no console window opens with it (see `console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use onezan_engine::{MidiTiming, TimedEvent, midi_queue};
@@ -7,6 +10,7 @@ use onezan_vst3_host::MidiEvent;
 use std::io::BufRead;
 use std::time::Duration;
 
+mod console;
 mod embed;
 mod fingering;
 mod gui;
@@ -101,8 +105,13 @@ enum Cmd {
 fn main() -> Result<()> {
     // SAFETY: first thing in main; no other thread exists yet.
     unsafe { onezan_engine::request_low_latency() };
+    console::attach();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    if !matches!(cli.cmd, None | Some(Cmd::Gui { .. })) {
+        console::ensure();
+    }
+    match cli.cmd {
         None => gui::run(Options {
             plugin: None,
             midi: None,

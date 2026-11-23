@@ -2,12 +2,22 @@
 //!
 //! The plugin is `$ONEZAN_TEST_PLUGIN` (a `.vst3` path), else the first installed instrument.
 //! Without one, each test prints a note and passes: these are for machines that have a plugin.
+//!
+//! The tests run one at a time ([`one_at_a_time`]), as the app uses plugins: some cannot have
+//! instances on several threads at once (Dexed, a JUCE plugin, hung that way).
 
 #[cfg(test)]
 mod tests {
     use onezan_engine::render_offline;
     use onezan_vst3_host::{MidiEvent, Plugin};
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Held for the whole of a test, taken before its plugin is loaded (so it is dropped after).
+    fn one_at_a_time() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     const RATE: u32 = 48_000;
     /// [`RATE`] as a frame count: one second.
@@ -56,6 +66,7 @@ mod tests {
 
     #[test]
     fn note_starts_at_its_frame_not_its_block() {
+        let _one = one_at_a_time();
         let Some(mut p) = plugin() else { return };
         // Frame 1000 lies inside the renderer's fourth 256-frame block (768..1024): a host that
         // applied events at the block start would sound from 768.
@@ -71,6 +82,7 @@ mod tests {
 
     #[test]
     fn released_note_goes_silent() {
+        let _one = one_at_a_time();
         let Some(mut p) = plugin() else { return };
         let len = SEC * 3;
         let (l, r) = render_offline(&mut p, RATE, len, vec![(0, on()), (SEC / 4, off())]).unwrap();
@@ -84,6 +96,7 @@ mod tests {
 
     #[test]
     fn sustain_pedal_holds_then_releases() {
+        let _one = one_at_a_time();
         let Some(mut p) = plugin() else { return };
         let s = SEC;
         let pedal = |value| MidiEvent::ControlChange {
@@ -105,6 +118,7 @@ mod tests {
 
     #[test]
     fn state_restores_into_a_fresh_instance() {
+        let _one = one_at_a_time();
         let Some(a) = plugin() else { return };
         let saved = a.state().unwrap();
         assert!(!saved.component.is_empty(), "the plugin wrote no state");

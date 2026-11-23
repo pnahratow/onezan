@@ -512,3 +512,28 @@ not have it.
   needs was not found). Unsolved; next idea: check what `wineasio64.dll.so` needs (libjack, with
   JACK running through PipeWire) and whether the DLL must be copied into the prefix's
   `system32`. Real latency and real interface drivers need a Windows PC either way.
+
+## Windows: a GUI program (2026-11-23)
+
+`#![windows_subsystem = "windows"]`: started from Explorer or a shortcut, no console window
+opens. `src/console.rs`: started from a terminal, the app attaches to it (`AttachConsole`), so
+the report and the command-line commands print there; a command-line command with nowhere to
+write (started from Explorer) opens a console of its own; redirected output (`> file`) is left
+alone. A GUI program does not make cmd/PowerShell wait: the prompt comes back at once, and the
+terminal competes for the keyboard (`play`'s "press Enter"; Ctrl+C works). Checked under Wine:
+subsystem 2 (GUI) in the PE header; `list` into the terminal and into a file; `wine start
+onezan.exe` opens only the window; `wine start onezan.exe play --demo` opens a console with the
+report.
+
+## Playing the on-screen keyboard (2026-11-23)
+
+Pressing a key with the mouse plays it at velocity 127; releasing the button, or sliding to
+another key (a glissando), releases it. `keyboard::show` returns the key under the held pointer
+(black keys lie over the white ones; unit test `the_mouse_finds_the_key_under_it`); the session
+has a queue of its own for it (`Session::play`), made again when the audio output changes. The
+key shows pressed at full velocity. Not recorded in the practice history (that is for the MIDI
+keyboard). Checked by hand on the host (Linux).
+
+The plugin tests (`crates/engine/tests/plugin.rs`) now run one at a time: with Dexed installed
+(it sorts before Surge XT, so it became the test plugin) four instances on parallel threads
+hung. The app only ever uses plugins from one thread.
