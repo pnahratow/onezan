@@ -130,8 +130,8 @@ Commit only when the user asks.
    app there for real (so far only lint/type-checked).
 4. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
    installed, so the first start always makes sound.
-5. Choosing instrument and MIDI port in the window (optional overrides; the automatic choice
-   stays the default). The options window is the natural place.
+5. Choosing the MIDI port in the window (optional override; the automatic choice stays the
+   default). The instrument can be chosen already (see "Choosing the instrument").
 6. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
    in the embedded editor; sharpness under fractional scaling (XWayland).
 7. Later: CLAP via `clack-host`.
@@ -418,3 +418,20 @@ settings and data folders are `%APPDATA%\onezan` there. The app itself runs unde
 (`wine target/x86_64-pc-windows-gnu/debug/onezan.exe`): the window, the Windows plugin folders,
 no MIDI ports (Wine passes none through by default). Wine is not Windows: real audio, MIDI,
 latency and the editor still need a Windows VM or PC (see the next steps).
+
+## Choosing the instrument (2026-11-23)
+
+The bar's "Instrument: ..." button opens the instruments window (an OS window of its own): the
+installed VST3 instruments, the one in use highlighted, the bundle path on hover. They are
+scanned when the window first opens; "Rescan" looks again (after installing one). Clicking one
+switches (`App::switch_instrument`): the current sound is saved, the editor removed, the session
+(plugin, MIDI input, audio) stopped, then a new session started with that plugin through the
+same code as at startup (`start_session`), with the keyboard in use, the metronome's settings and
+whether it was running, and the scale. The new instrument's own saved sound is restored, and it
+is remembered for the next start. If it fails, the previous instrument is started again and the
+window says why in red. The window keeps its size (the new editor is fitted into it).
+
+Checked in the VM with a throwaway build that switched by itself (no click tool here): a switch
+to Surge XT again (full teardown and restart: sound saved and restored, editor embedded again,
+MIDI reconnected) and to a missing id (Surge XT back, the reason shown). Not checked: switching
+between two different instruments (only one is installed here), with the mouse.

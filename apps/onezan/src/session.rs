@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What to start; `None` means "pick the best by itself".
+#[derive(Clone)]
 pub struct Options {
     pub plugin: Option<String>,
     pub midi: Option<String>,
@@ -24,7 +25,7 @@ pub struct Options {
 }
 
 /// The choices used last time (from the settings).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Remembered {
     /// The plugin's class id.
     pub plugin: Option<String>,

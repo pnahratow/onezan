@@ -16,6 +16,7 @@ use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
 use onezan_engine::{Click, Keys, Metronome, MidiChange, Verdict};
 use onezan_vst3_host::Editor;
+use onezan_vst3_host::PluginInfo;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -92,6 +93,15 @@ pub fn run(mut opts: Options) -> Result<()> {
     Ok(())
 }
 
+/// The windows the bar's buttons open, each an OS window of its own (the plugin's editor would
+/// cover anything drawn inside the main window).
+#[derive(Default)]
+struct OpenWindows {
+    options: bool,
+    scales: bool,
+    instruments: bool,
+}
+
 /// The MIDI keyboard as the bar shows it.
 #[derive(Clone)]
 enum MidiState {
@@ -116,10 +126,14 @@ struct App {
     midi: Arc<Mutex<MidiState>>,
     range: RangeInclusive<u8>,
     preview: Preview,
-    /// The options window is open.
-    options_open: bool,
-    /// The scales window is open.
-    scales_open: bool,
+    /// Which of the windows of their own are open.
+    open: OpenWindows,
+    /// The installed instruments, scanned when that window first opens (and on "Rescan").
+    instruments: Option<Vec<PluginInfo>>,
+    /// Why the last switch of instrument did not work.
+    instrument_note: Option<String>,
+    /// What the app was started with; a switch of instrument starts again from it.
+    opts: Options,
     scale_order: ScaleOrder,
     /// Records the notes played (`None`: no practice history this run).
     recorder: Option<Recorder>,
@@ -161,34 +175,11 @@ impl App {
         let repaint = ctx.clone();
         keys.set_waker(move || repaint.request_repaint());
         let midi = Arc::new(Mutex::new(MidiState::Waiting));
-        let (shared, repaint) = (Arc::clone(&midi), ctx.clone());
-        let on_midi = move |c: MidiChange| {
-            println!("{:<10}{}", "MIDI in", crate::report::midi_change(&c));
-            *shared.lock().unwrap_or_else(PoisonError::into_inner) = midi_state(&c);
-            repaint.request_repaint();
+        let (session, error) = match start_session(ctx, opts, &keys, &midi) {
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e)),
         };
-        let (session, error) = match Session::start(opts, Vec::new(), Arc::clone(&keys), on_midi) {
-            Ok(s) => {
-                crate::report::print_report(&s);
-                if let Some(c) = &s.first_midi {
-                    *midi.lock().unwrap_or_else(PoisonError::into_inner) = midi_state(c);
-                }
-                (Some(s), None)
-            }
-            Err(e) => {
-                eprintln!("error: {e:#}");
-                (None, Some(format!("{e:#}")))
-            }
-        };
-        let (editor, editor_note) = match session.as_ref().map(|s| s.plugin().editor()) {
-            Some(Ok(e)) => {
-                let repaint = ctx.clone();
-                e.set_waker(move || repaint.request_repaint());
-                (Some(e), None)
-            }
-            Some(Err(e)) => (None, Some(e.to_string())),
-            None => (None, None),
-        };
+        let (editor, editor_note) = session.as_ref().map_or((None, None), |s| make_editor(ctx, s));
         if let Some(m) = session.as_ref().map(Session::metronome) {
             apply_metronome(m, &settings.metronome, opts.metronome.is_none());
         }
@@ -207,8 +198,10 @@ impl App {
                 .as_deref()
                 .and_then(Preview::from_name)
                 .unwrap_or_default(),
-            options_open: false,
-            scales_open: false,
+            open: OpenWindows::default(),
+            instruments: None,
+            instrument_note: None,
+            opts: opts.clone(),
             scale_order: ScaleOrder::Learning,
             recorder,
             recorded_scale: None,
@@ -274,7 +267,11 @@ impl App {
 
     fn bar(&mut self, ui: &mut egui::Ui) {
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, self.preview);
-        let (options, scales) = (&mut self.options_open, &mut self.scales_open);
+        let (options, scales, instruments) = (
+            &mut self.open.options,
+            &mut self.open.scales,
+            &mut self.open.instruments,
+        );
         let metronome = session.map(|s| Arc::clone(s.metronome()));
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
         egui::Sides::new().shrink_left().truncate().show(
@@ -284,7 +281,11 @@ impl App {
                 ui.separator();
                 let section = |label| session.and_then(|s| s.section(label));
                 let short = |label| section(label).map_or("none", |s: &Section| s.short.as_str());
-                item(ui, "Instrument", &shorten(short("plugin")), None, section("plugin"));
+                let r = toggle(ui, instruments, format!("Instrument: {}", shorten(short("plugin"))));
+                if let Some(s) = section("plugin") {
+                    r.on_hover_text(format!("Click to choose another.\n\n{}", explain(s)));
+                }
+                ui.separator();
 
                 let midi = midi.lock().unwrap_or_else(PoisonError::into_inner).clone();
                 let (text, dot) = match &midi {
@@ -347,8 +348,112 @@ impl App {
             ui.ctx().input(|i| i.viewport().close_requested())
         });
         if close {
-            self.options_open = false;
+            self.open.options = false;
             self.options_size = None;
+        }
+    }
+
+    /// Switches to the instrument `class_id`: the current one's sound is saved, its editor
+    /// removed and audio stopped; then the new one starts (with its own saved sound) on the same
+    /// keyboard, metronome and scale. If it fails, the previous instrument comes back.
+    fn switch_instrument(&mut self, ctx: &egui::Context, class_id: &str) {
+        let now = self.settings();
+        let ticking = self.session.as_ref().is_some_and(|s| s.metronome().is_on());
+        let previous = self.session.as_ref().map(|s| s.plugin().class_id().to_owned());
+        // In this order: the editor leaves its window, then the plugin goes.
+        drop(self.embedded.borrow_mut().take());
+        drop(self.editor.take());
+        if let Some(s) = self.session.take() {
+            s.save_sound();
+            s.stop();
+        }
+        let mut opts = self.opts.clone();
+        opts.plugin = Some(class_id.to_owned());
+        opts.metronome = None;
+        // The keyboard in use now, if any (else the usual choice).
+        opts.remembered.midi.clone_from(&now.midi);
+        let session = match start_session(ctx, &opts, &self.keys, &self.midi) {
+            Ok(s) => {
+                self.instrument_note = None;
+                Some(s)
+            }
+            Err(e) => {
+                self.instrument_note = Some(format!("Could not switch: {e}"));
+                previous.and_then(|p| {
+                    opts.plugin = Some(p);
+                    start_session(ctx, &opts, &self.keys, &self.midi).ok()
+                })
+            }
+        };
+        if let Some(m) = session.as_ref().map(Session::metronome) {
+            apply_metronome(m, &now.metronome, true);
+            m.set_on(ticking);
+        }
+        self.error = session.is_none().then(|| "no instrument could be started".to_owned());
+        (self.editor, self.editor_note) = session.as_ref().map_or((None, None), |s| make_editor(ctx, s));
+        self.session = session;
+    }
+
+    /// The installed instruments, in a window of their own: click one to switch to it.
+    fn instruments_window(&mut self, ctx: &egui::Context) {
+        let list = self.instruments.get_or_insert_with(|| {
+            crate::plugins::installed()
+                .into_iter()
+                .filter(PluginInfo::is_instrument)
+                .collect()
+        });
+        let current = self.session.as_ref().map(|s| s.plugin().class_id().to_owned());
+        let note = self.instrument_note.clone();
+        let builder = egui::ViewportBuilder::default()
+            .with_title("onezan instruments")
+            .with_app_id("onezan")
+            .with_inner_size([440.0, 420.0]);
+        let (mut pick, mut rescan) = (None, false);
+        let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("instruments"), builder, |ui, _| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                if let Some(n) = &note {
+                    ui.label(RichText::new(n).color(Color32::from_rgb(239, 68, 68)));
+                    ui.separator();
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Rescan")
+                        .on_hover_text("Look for instruments again, after installing one")
+                        .clicked()
+                    {
+                        rescan = true;
+                    }
+                    ui.label(RichText::new(format!("{} installed", list.len())).weak());
+                });
+                ui.separator();
+                if list.is_empty() {
+                    let dirs = onezan_vst3_host::default_search_paths();
+                    let dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+                    ui.label(format!("No VST3 instruments found in:\n{}", dirs.join("\n")));
+                }
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    for p in list.iter() {
+                        let selected = current.as_deref() == Some(p.class_id.as_str());
+                        let text = format!("{}   {}", p.name, p.vendor);
+                        let r = ui
+                            .selectable_label(selected, text)
+                            .on_hover_text(p.bundle.display().to_string());
+                        if r.clicked() && !selected {
+                            pick = Some(p.class_id.clone());
+                        }
+                    }
+                });
+            });
+            ui.ctx().input(|i| i.viewport().close_requested())
+        });
+        if rescan {
+            self.instruments = None;
+        }
+        if let Some(id) = pick {
+            self.switch_instrument(ctx, &id);
+        }
+        if close {
+            self.open.instruments = false;
         }
     }
 
@@ -397,7 +502,7 @@ impl App {
             ui.ctx().input(|i| i.viewport().close_requested())
         });
         if close {
-            self.scales_open = false;
+            self.open.scales = false;
             self.practice_read = None;
         }
     }
@@ -487,6 +592,46 @@ impl App {
 
 /// The metronome's controls, right to left (the bar's right side is laid out that way): the
 /// tempo, then the switch. Its sound and volume are in the options window.
+/// Starts the instrument, keyboard and audio with `opts`; the bar's MIDI state follows the
+/// keyboard. Prints the startup report. The error as text when nothing could be started.
+fn start_session(
+    ctx: &egui::Context,
+    opts: &Options,
+    keys: &Arc<Keys>,
+    midi: &Arc<Mutex<MidiState>>,
+) -> Result<Session, String> {
+    let (shared, repaint) = (Arc::clone(midi), ctx.clone());
+    let on_midi = move |c: MidiChange| {
+        println!("{:<10}{}", "MIDI in", crate::report::midi_change(&c));
+        *shared.lock().unwrap_or_else(PoisonError::into_inner) = midi_state(&c);
+        repaint.request_repaint();
+    };
+    match Session::start(opts, Vec::new(), Arc::clone(keys), on_midi) {
+        Ok(s) => {
+            crate::report::print_report(&s);
+            *midi.lock().unwrap_or_else(PoisonError::into_inner) =
+                s.first_midi.as_ref().map_or(MidiState::Waiting, midi_state);
+            Ok(s)
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            Err(format!("{e:#}"))
+        }
+    }
+}
+
+/// The instrument's own editor, to embed at the next frame; or why there is none.
+fn make_editor(ctx: &egui::Context, session: &Session) -> (Option<Editor>, Option<String>) {
+    match session.plugin().editor() {
+        Ok(e) => {
+            let repaint = ctx.clone();
+            e.set_waker(move || repaint.request_repaint());
+            (Some(e), None)
+        }
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
 /// Sets the metronome from saved settings; the tempo only when `tempo` (not given on the
 /// command line). A sound that no longer exists keeps the default.
 fn apply_metronome(m: &Metronome, s: &MetronomeSettings, tempo: bool) {
@@ -781,11 +926,14 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.options_open {
+        if self.open.options {
             self.options_window(ui.ctx());
         }
-        if self.scales_open {
+        if self.open.scales {
             self.scales_window(ui.ctx());
+        }
+        if self.open.instruments {
+            self.instruments_window(ui.ctx());
         }
         self.record_scale();
         // Bottom panels stack upwards: the keyboard at the very bottom, the bar above it.
