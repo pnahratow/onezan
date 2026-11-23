@@ -89,7 +89,8 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   progress.rs           practice history: every note with its scale, in SQLite; practice time
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
                         hands, any octaves; the preview the window shows
-build/                  Linux release build in a container (glibc 2.30+)
+build/                  Linux release build in a container (glibc 2.30+); Windows release zip
+                        (windows-release.sh, cross-built with MinGW)
 README.md, LICENSE (GPL-3.0), .gitignore
 ```
 
@@ -537,3 +538,13 @@ keyboard). Checked by hand on the host (Linux).
 The plugin tests (`crates/engine/tests/plugin.rs`) now run one at a time: with Dexed installed
 (it sorts before Surge XT, so it became the test plugin) four instances on parallel threads
 hung. The app only ever uses plugins from one thread.
+
+## Windows release zip (2026-11-23)
+
+`build/windows-release.sh [DIR]` cross-builds with MinGW (no container: the exe links only to
+Windows' own DLLs, including the Universal C Runtime, `api-ms-win-crt-*`, part of Windows 10+),
+strips it (27 to 20 MB), and zips it with README.md and LICENSE as
+`target/windows-release/onezan-VERSION-COMMIT-windows-x64.zip` (about 8 MB); with DIR it copies
+the zip there. It fails if the exe would need a MinGW runtime DLL (libgcc, libstdc++,
+libwinpthread). Uncommitted changes make the name `COMMIT-dirty`. The zip from 49f2cb3 opened
+its window and listed Surge XT under Wine; not run on real Windows yet.

@@ -33,6 +33,16 @@ On Linux, the Windows build can be checked with Wine (`wine` and the MinGW cross
 Arch's `mingw-w64-gcc`): `cargo test --target x86_64-pc-windows-gnu --workspace` builds the tests
 for Windows and runs them under Wine.
 
+The Windows release zip (the exe, needing only DLLs that come with Windows 10 and 11, with this
+README and the licence) is cross-built the same way:
+
+```sh
+build/windows-release.sh [DIR]   # -> target/windows-release/onezan-VERSION-COMMIT-windows-x64.zip
+```
+
+With a folder given, the zip is copied there too. A build from uncommitted changes is named
+`COMMIT-dirty`.
+
 ## Use
 
 ```sh
