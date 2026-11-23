@@ -215,6 +215,16 @@ works on any GL driver (the VM has only llvmpipe).
 - Checked in the VM with screenshots (`grim`), with notes sent through the Midi Through port
   (`onezan gui --midi through` plus `aseqsend -p 14:0 90 3C 64`).
 
+## Linux release build (2026-11-23)
+
+`build/linux-release.sh` builds in an Ubuntu 20.04 container (`build/linux.Dockerfile`), with
+rootless Podman (preferred: no root, no daemon, no docker group; the user's choice) or Docker.
+Ubuntu 20.04 was the user's choice for the widest reach without going ancient; it beats Debian
+11 (same glibc) because its package archive stays online during extended support (to 2030).
+Result: needs glibc 2.30+, links only libc/libm/libdl/libpthread/libgcc_s and libasound.so.2;
+GL, X11/Wayland and JACK are loaded at runtime. Checked: the binary renders and opens the window
+on Arch. First build about 2 minutes; crates are cached in `target/container-cargo-home`.
+
 ## Lints (2026-11-23)
 
 Strict clippy, from https://www.namtao.com/rust/ ("Strict lints"): `[workspace.lints.clippy]` in the

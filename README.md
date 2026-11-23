@@ -18,8 +18,16 @@ JACK at runtime and runs without it.
 Tested on Linux Mint 22 (the Debian line) and Arch (the Arch line). Windows should need nothing
 beyond Rust (not tried yet).
 
-A binary runs only on systems whose glibc is at least as new as the one it was built on: build
-on the machine you run it on (or on the oldest system you want to support).
+A binary runs only on systems whose glibc is at least as new as the one it was built on. For a
+binary that runs on most distributions (glibc 2.30+: Ubuntu 20.04+, Mint 20+, Debian 11+,
+Fedora 32+, Arch, openSUSE), build it in a container with rootless Podman (or Docker):
+
+```sh
+build/linux-release.sh      # -> target/linux-release/release/onezan
+```
+
+It needs only Podman on the build machine, and only glibc and ALSA (`libasound.so.2`) on the
+machine it runs on; graphics and JACK are loaded at runtime.
 
 ## Use
 
