@@ -113,13 +113,13 @@ impl App {
         let midi = Arc::new(Mutex::new(MidiState::Waiting));
         let (shared, repaint) = (Arc::clone(&midi), ctx.clone());
         let on_midi = move |c: MidiChange| {
-            println!("{:<10}{}", "MIDI in", crate::midi_change(&c));
+            println!("{:<10}{}", "MIDI in", crate::report::midi_change(&c));
             *shared.lock().unwrap_or_else(PoisonError::into_inner) = midi_state(&c);
             repaint.request_repaint();
         };
         let (session, error) = match Session::start(opts, Vec::new(), Arc::clone(&keys), on_midi) {
             Ok(s) => {
-                crate::print_report(&s);
+                crate::report::print_report(&s);
                 if let Some(c) = &s.first_midi {
                     *midi.lock().unwrap_or_else(PoisonError::into_inner) = midi_state(c);
                 }

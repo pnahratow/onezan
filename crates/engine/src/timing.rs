@@ -13,7 +13,7 @@
 //! the extra delay hurts more than the unevenness, so immediate wins. [`MidiTiming::Auto`]
 //! decides per callback, so it follows block size changes.
 
-use crate::{Considered, Verdict};
+use crate::report::{Considered, Verdict};
 use onezan_vst3_host::MidiEvent;
 use std::time::{Duration, Instant};
 

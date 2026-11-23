@@ -1,12 +1,13 @@
 //! A running instrument: the plugin, the MIDI keyboard and the audio output, as `play` and the
 //! window both use them.
 
-use crate::{audio_detail, load};
+use crate::plugins::load;
 use anyhow::Result;
 use onezan_engine::midi_in::POLL;
 use onezan_engine::{AudioOut, Considered, Consumer, Keys, MidiChange, MidiTiming, MidiWatch, TimedEvent, midi_queue};
 use onezan_vst3_host::Plugin;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// What to start; `None` means "pick the best by itself".
 pub struct Options {
@@ -111,9 +112,7 @@ impl Session {
 
 /// "JACK, 5.3 ms": the backend and the block length in use.
 fn audio_short(audio: &AudioOut) -> String {
-    let block = audio
-        .block_frames(std::time::Duration::from_secs(1))
-        .or(audio.buffer_frames);
+    let block = audio.block_frames(Duration::from_secs(1)).or(audio.buffer_frames);
     block.map_or_else(
         || audio.backend.clone(),
         |n| {
@@ -121,4 +120,25 @@ fn audio_short(audio: &AudioOut) -> String {
             format!("{}, {ms:.1} ms", audio.backend)
         },
     )
+}
+
+/// The audio line's settings: rate and the block size really in use, with its latency, and a
+/// note when the system did not grant the block size asked for.
+fn audio_detail(audio: &AudioOut) -> String {
+    let ms = |n: u32| f64::from(n) * 1000.0 / f64::from(audio.sample_rate);
+    let block = audio.block_frames(Duration::from_secs(1)).or(audio.buffer_frames);
+    let block_text = block.map_or_else(
+        || "block size unknown".to_string(),
+        |n| format!("block {n} frames ({:.1} ms)", ms(n)),
+    );
+    let not_granted = match (block, audio.requested_frames) {
+        (Some(n), Some(asked)) if n > asked => {
+            format!(
+                "; asked for {asked} ({:.1} ms), the system's minimum is higher",
+                ms(asked)
+            )
+        }
+        _ => String::new(),
+    };
+    format!("{} Hz, {block_text}{not_granted}", audio.sample_rate)
 }

@@ -48,24 +48,41 @@ Clone them again if needed.
 
 ```
 Cargo.toml              workspace; edition 2024; GPL-3.0-or-later
-crates/vst3-host/       onezan-vst3-host: the VST3 host
+crates/vst3-host/       onezan-vst3-host: the VST3 host (no devices, no GUI)
   module.rs             find the binary in the bundle, dlopen + ModuleEntry (Linux) / InitDll (Win),
                         GetPluginFactory, list classes, createInstance. Libraries are never unloaded.
   host.rs               HostApp (IHostApplication + IComponentHandler), HostMessage, HostAttributeList
   events.rs             EventList, ParamChanges / ParamQueue (pre-allocated, used on the audio thread)
   plugin.rs             Plugin (main thread): load, connect component and controller, start(sr, max_frames)
                         -> Processor (Send, audio thread): notes as events; CC, pressure and pitch
-                        bend via the IMidiMapping table
+                        bend via the IMidiMapping table. Plugin::editor() -> Editor
+  editor.rs             Editor: the plugin's IPlugView in a parent window of the app; IPlugFrame
+  run_loop.rs           Linux: IRunLoop, the editor's timers and descriptors serviced on the UI thread
   midi.rs               MidiEvent::parse (has a unit test)
   scan.rs               default_search_paths ($VST3_PATH, ~/.vst3, /usr/lib/vst3, ...), find_bundles, scan
-crates/engine/          onezan-engine: midir input -> rtrb queues -> cpal output callback
-                        (asks for a 256-frame buffer, f32); render_offline
+  util.rs               conversions (platform enum types, strings, TUIDs)
+crates/engine/          onezan-engine: MIDI in, audio out, timing
+  lib.rs                module map, re-exports, MIDI queues (rtrb)
+  midi_in.rs            choose_midi_port, MidiWatch (opens, reconnects, releases held notes), Keys
+                        (held keys with velocity, pedal; for display)
+  audio_out.rs          pick_output (JACK, else default), request_low_latency, AudioOut
+  callback.rs           the audio callback: drain queues, place events, run the plugin
+  timing.rs             exact vs. immediate placement of live MIDI in a block
+  report.rs             Considered / Verdict: what was considered and why (startup report)
+  offline.rs            render_offline (checks without an audio device)
+  tests/                plugin.rs (offline, against a real plugin), midi_hotplug.rs (virtual port)
 apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | midi |
                         play [PLUGIN] [--midi PORT] [--demo] | render [PLUGIN]
-  session.rs            plugin + MIDI watcher + audio, with the startup report (play and the window)
-  gui.rs                the window (egui/eframe, OpenGL): top bar, instrument area, keyboard
-  keyboard.rs           the on-screen keyboard widget, with fingering badges
+  main.rs               command line, play, render
+  plugins.rs            installed plugins; resolve/load: which plugin an argument picks, and why
+  session.rs            plugin + MIDI watcher + audio started together, with the report sections
+  report.rs             the startup report as text
+  gui.rs                the window (egui/eframe, OpenGL, our own event loop): editor, status bar,
+                        keyboard
+  embed.rs              the X11 child window holding the plugin's editor; fitting it in
+  keyboard.rs           the on-screen keyboard widget: scale tint, velocity meter, fingering badges
   fingering.rs          fingering preview (only C major for now)
+build/                  Linux release build in a container (glibc 2.30+)
 README.md, LICENSE (GPL-3.0), .gitignore
 ```
 

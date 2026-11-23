@@ -5,8 +5,8 @@
 //! and pitch bend reset), so nothing hangs. When no port is open, the first one
 //! [`choose_midi_port`] picks is opened.
 
+use crate::report::{Considered, Verdict};
 use crate::timing::TimedEvent;
-use crate::{Considered, choose_midi_port};
 use anyhow::Result;
 use onezan_vst3_host::MidiEvent;
 use rtrb::Producer;
@@ -31,6 +31,54 @@ pub enum MidiChange {
         port: String,
         error: String,
     },
+}
+
+/// Names of the available MIDI input ports.
+///
+/// # Errors
+///
+/// When the system MIDI client cannot be created.
+pub fn midi_input_ports() -> Result<Vec<String>> {
+    let input = midir::MidiInput::new("onezan")?;
+    Ok(input.ports().iter().filter_map(|p| input.port_name(p).ok()).collect())
+}
+
+/// A loopback port ("Midi Through"): it only echoes what other programs send, it is no keyboard.
+fn is_loopback(port: &str) -> bool {
+    port.to_lowercase().contains("through")
+}
+
+/// Picks the MIDI port: the first whose name contains `query` (case-insensitive), or, without a
+/// query, the first that is not a loopback. Returns its index and a verdict for every port.
+#[must_use]
+pub fn choose_midi_port(ports: &[String], query: Option<&str>) -> (Option<usize>, Vec<Considered>) {
+    let q = query.map(str::to_lowercase);
+    let fits = |p: &String| {
+        q.as_ref()
+            .map_or_else(|| !is_loopback(p), |q| p.to_lowercase().contains(q))
+    };
+    let chosen = ports.iter().position(fits);
+    let considered = ports
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (verdict, why) = match (Some(i) == chosen, &q) {
+                (true, Some(q)) => (Verdict::Used, format!("matches \"{q}\"")),
+                (true, None) => (Verdict::Used, "the first port that is not a loopback".to_string()),
+                (false, Some(q)) if !fits(p) => (Verdict::NotUsed, format!("does not match \"{q}\"")),
+                (false, None) if is_loopback(p) => (
+                    Verdict::NotUsed,
+                    "a loopback that echoes other programs, not a keyboard".to_string(),
+                ),
+                (false, _) => (
+                    Verdict::NotUsed,
+                    "another port was picked first; choose with --midi".to_string(),
+                ),
+            };
+            Considered::new(p.clone(), verdict, why)
+        })
+        .collect();
+    (chosen, considered)
 }
 
 /// The keys the keyboard holds right now (all channels merged), how hard each was struck, and
@@ -407,5 +455,37 @@ mod tests {
         // Nothing is held any more.
         feed.release_all();
         assert_eq!(drain(&mut rx), []);
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn midi_skips_loopback_without_query() {
+        let ports = names(&["Midi Through Port-0", "EasyKeys49 MIDI 1", "Other Keys"]);
+        let (chosen, c) = choose_midi_port(&ports, None);
+        assert_eq!(chosen, Some(1));
+        assert_eq!(
+            c.iter().map(|c| c.verdict).collect::<Vec<_>>(),
+            [Verdict::NotUsed, Verdict::Used, Verdict::NotUsed]
+        );
+        assert!(c[0].why.contains("loopback"));
+        assert!(c[2].why.contains("--midi"));
+    }
+
+    #[test]
+    fn midi_query_matches_case_insensitively() {
+        let ports = names(&["Midi Through Port-0", "EasyKeys49 MIDI 1"]);
+        let (chosen, c) = choose_midi_port(&ports, Some("THROUGH"));
+        assert_eq!(chosen, Some(0));
+        assert!(c[1].why.contains("does not match"));
+    }
+
+    #[test]
+    fn midi_none_when_only_loopback() {
+        let (chosen, c) = choose_midi_port(&names(&["Midi Through Port-0"]), None);
+        assert_eq!(chosen, None);
+        assert_eq!(c[0].verdict, Verdict::NotUsed);
     }
 }
