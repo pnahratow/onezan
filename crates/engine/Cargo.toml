@@ -1,0 +1,16 @@
+[package]
+name = "onezan-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+onezan-vst3-host.workspace = true
+cpal.workspace = true
+midir.workspace = true
+rtrb.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

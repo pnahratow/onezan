@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/vst3-host", "crates/engine", "apps/onezan"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+onezan-vst3-host = { path = "crates/vst3-host" }
+onezan-engine = { path = "crates/engine" }
+vst3 = "0.3"
+libloading = "0.8"
+cpal = "0.16"
+midir = "0.10"
+rtrb = "0.3"
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+
+# Strict lints, from https://www.namtao.com/rust/ ("Strict lints"). Test code is exempted from
+# the panic lints in clippy.toml.
+[workspace.lints.clippy]
+# "Um, actually" group
+pedantic = { level = "deny", priority = -1 }
+# Developing lints
+nursery = { level = "deny", priority = -1 }
+# Deny panics
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"

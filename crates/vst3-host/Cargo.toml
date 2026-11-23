@@ -1,0 +1,14 @@
+[package]
+name = "onezan-vst3-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vst3.workspace = true
+libloading.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true
