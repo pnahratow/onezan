@@ -95,11 +95,8 @@ Commit only when the user asks.
 
 ## Next steps, in order
 
-1. **Plugin editor in the window's middle area**: IPlugView attached to a child window, and the
-   Linux IRunLoop (the plugin's timers and file descriptors serviced on the UI thread). Linux needs
-   an X11 parent, so the window must run on X11 (XWayland under Hyprland; winit can be told to);
-   Windows needs an HWND. transit's `view.rs` and `run_loop.rs` are the reference. The window
-   should size itself to the editor.
+1. Check the embedded editor by hand on the real machine: clicking and dragging in it, typing
+   (keyboard focus), sharpness under fractional scaling, closing. Then Windows (HWND child).
 2. Compare `--midi-timing` modes by ear on the real machine (256-frame blocks under `pw-jack`).
 3. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
    installed, so the first start always makes sound.
@@ -193,23 +190,29 @@ port address back would go unnoticed.
 overrides). egui 0.36 through eframe with the OpenGL (glow) backend, not wgpu: lighter, and
 works on any GL driver (the VM has only llvmpipe).
 
-- **Top bar**: instrument, MIDI port (green dot when connected; "plug in a keyboard" otherwise;
-  live), "pedal" while sustain is down, audio backend and block length, timing mode. Hovering an
+- **Layout, top to bottom**: the plugin's editor, the status bar, the keyboard. The editor is a
+  native window over ours, so nothing egui draws can show over it (menus and tooltips vanished
+  behind it on the user's host); with the bar below it they open over the keyboard instead.
+- **Status bar**: instrument, MIDI port (green dot when connected; "plug in a keyboard" otherwise;
+  live), a pedal LED (amber while sustain is down; always there, so nothing moves), audio
+  backend and block length, timing mode. Hovering an
   item shows the startup report for it (what was chosen, why, the alternatives). On the right,
   the fingering picker. When the window is narrow the left part is cut off, not overlapped.
-- **Middle**: placeholder for the plugin's editor (next step).
+- **Top**: the plugin's own editor (see "The plugin editor" below), at the top and centred
+  across; a note when there is none.
 - **Keyboard**: 49 keys, C2 to C6, by default. Reasons: the most common small keyboard size (the
   user's), and exactly two octaves per hand for scales hands together, left hand C2 to C4 and
   right hand C4 to C6, meeting on middle C. A played key outside the range widens it by whole
   octaves, so nothing played is invisible. MIDI cannot tell the keyboard's size, so this is the
   only way to adapt.
 - **Key design** (`keyboard.rs`), in layers: key (white or black); state (in the scale: light
-  tint; pressed: blue); up to two fingering badges, numbered circles, right hand blue and left
+  tint; pressed: light blue tint plus a blue fill rising from the front edge like a level meter,
+  as high as the key was struck hard: velocity 127 fills the key); up to two fingering badges, numbered circles, right hand blue and left
   hand orange. Badges sit where the finger lands: the front of a white key below the black keys,
   the lower end of a black key. When both hands use one key, the left badge is above the right.
   C keys are labelled with their octave (C4 = middle C).
-- Held keys come from the engine: `onezan_engine::Keys` (atomic bitsets, all channels merged, and
-  the sustain pedal), written by the MIDI thread, which also wakes the window to repaint.
+- Held keys come from the engine: `onezan_engine::Keys` (per key the velocity it was struck with
+  while held, 0 when up; all channels merged; and the sustain pedal), written by the MIDI thread, which also wakes the window to repaint.
 - Fingering preview: only "C major, both hands" so far (`fingering.rs`), to show the badges. The
   real scale table replaces it.
 - Checked in the VM with screenshots (`grim`), with notes sent through the Midi Through port
@@ -224,6 +227,35 @@ Ubuntu 20.04 was the user's choice for the widest reach without going ancient; i
 Result: needs glibc 2.30+, links only libc/libm/libdl/libpthread/libgcc_s and libasound.so.2;
 GL, X11/Wayland and JACK are loaded at runtime. Checked: the binary renders and opens the window
 on Arch. First build about 2 minutes; crates are cached in `target/container-cargo-home`.
+
+## The plugin editor (2026-11-23)
+
+The middle of the window shows the plugin's own editor (`IPlugView`), embedded.
+
+- **Host side** (`crates/vst3-host`): `Plugin::editor()` makes the view (`createView("editor")`,
+  `X11EmbedWindowID` on Linux, `HWND` on Windows); `Editor::attach(parent)`, `size`, `can_resize`,
+  `resize` (`checkSizeConstraint` + `onSize`), `requested_size` (from `IPlugFrame::resizeView`),
+  `idle`. Dropping the editor calls `removed` and clears the frame; the plugin refuses to be torn
+  down while its editor is alive (it leaks itself instead, like with a live processor).
+- **Linux run loop** (`run_loop.rs`): the frame answers `IRunLoop`. Handlers and timers live on
+  the UI thread; `service()` calls the handlers whose descriptor is readable (`poll` without
+  waiting) and the due timers, never while holding a borrow (plugins register from inside).
+  Surge XT registers two descriptors (its X11 connection and a timer descriptor) and no timers.
+- **Window side** (`apps/onezan/src/embed.rs`, `gui.rs`): the window runs on X11 (winit
+  `with_x11`; XWayland under Wayland). An X11 child window of ours (x11rb) is placed over the
+  top area and the editor attached to it; a resizable editor is asked to fill the area (Surge keeps
+  its proportions), any editor sits at the top, centred across, and is cut off where it does not
+  fit. Verified working on the user's host (Mint). At the first
+  frame the window asks to fit the editor (tiling desktops may ignore that).
+- **Our own event loop**: eframe is driven with `create_native` + `pump_eframe_app`. While an
+  editor is open the loop returns every 4 ms to service the plugin, without repainting the
+  window. With eframe's own loop every service meant a repaint: 80 repaints a second and 300 %
+  CPU in the VM (software GL); now about 4 % idle.
+- **Closing**: the editor is removed when the window's close is requested, before the window and
+  the plugin go. Checked: clean exit, nothing left registered.
+- Not done or not checked: Windows (stub, the middle shows a note); mouse and keyboard in the
+  editor (the VM cannot send real input); under fractional scaling XWayland windows are scaled
+  by the desktop and may look soft; keyboard focus inside the editor.
 
 ## Lints (2026-11-23)
 

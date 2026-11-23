@@ -10,7 +10,7 @@ use crate::{Considered, choose_midi_port};
 use anyhow::Result;
 use onezan_vst3_host::MidiEvent;
 use rtrb::Producer;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
@@ -33,23 +33,38 @@ pub enum MidiChange {
     },
 }
 
-/// The keys the keyboard holds right now (all channels merged), and the sustain pedal: for
-/// display. Written by the MIDI thread, read by anyone.
-#[derive(Default)]
+/// The keys the keyboard holds right now (all channels merged), how hard each was struck, and
+/// the sustain pedal: for display. Written by the MIDI thread, read by anyone.
 pub struct Keys {
-    held: [AtomicU64; 2],
+    /// Per key, the velocity it was struck with while it is held; 0 when it is up (a note-on
+    /// always has a velocity of at least 1: one of 0 arrives as a note-off).
+    velocity: [AtomicU8; 128],
     sustain: AtomicBool,
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self {
+            velocity: std::array::from_fn(|_| AtomicU8::new(0)),
+            sustain: AtomicBool::new(false),
+            waker: OnceLock::new(),
+        }
+    }
 }
 
 impl Keys {
     /// Whether `key` (a MIDI note number) is held down.
     #[must_use]
     pub fn held(&self, key: u8) -> bool {
-        let (word, bit) = key_bit(key);
-        self.held
-            .get(word)
-            .is_some_and(|w| w.load(Ordering::Relaxed) & bit != 0)
+        self.velocity(key).is_some()
+    }
+
+    /// How hard `key` was struck (1 to 127), while it is held.
+    #[must_use]
+    pub fn velocity(&self, key: u8) -> Option<u8> {
+        let v = self.velocity.get(usize::from(key))?.load(Ordering::Relaxed);
+        (v > 0).then_some(v)
     }
 
     /// Whether the sustain pedal is down.
@@ -65,19 +80,14 @@ impl Keys {
     }
 
     fn update(&self, ev: MidiEvent) {
-        let set = |key: u8, down: bool| {
-            let (word, bit) = key_bit(key);
-            if let Some(w) = self.held.get(word) {
-                if down {
-                    w.fetch_or(bit, Ordering::Relaxed);
-                } else {
-                    w.fetch_and(!bit, Ordering::Relaxed);
-                }
+        let set = |key: u8, v: u8| {
+            if let Some(slot) = self.velocity.get(usize::from(key)) {
+                slot.store(v, Ordering::Relaxed);
             }
         };
         match ev {
-            MidiEvent::NoteOn { key, .. } => set(key, true),
-            MidiEvent::NoteOff { key, .. } => set(key, false),
+            MidiEvent::NoteOn { key, velocity, .. } => set(key, velocity.max(1)),
+            MidiEvent::NoteOff { key, .. } => set(key, 0),
             MidiEvent::ControlChange {
                 controller: 64, value, ..
             } => self.sustain.store(value >= 64, Ordering::Relaxed),
@@ -87,8 +97,8 @@ impl Keys {
     }
 
     fn clear(&self) {
-        for w in &self.held {
-            w.store(0, Ordering::Relaxed);
+        for v in &self.velocity {
+            v.store(0, Ordering::Relaxed);
         }
         self.sustain.store(false, Ordering::Relaxed);
         self.wake();
@@ -99,14 +109,6 @@ impl Keys {
             w();
         }
     }
-}
-
-/// The word and bit of `key` in [`Keys::held`].
-fn key_bit(key: u8) -> (usize, u64) {
-    (
-        usize::from(key / 64),
-        1u64.checked_shl(u32::from(key % 64)).unwrap_or(0),
-    )
 }
 
 /// Watches the MIDI ports and keeps one open; stops when dropped.
@@ -375,6 +377,8 @@ mod tests {
         });
         drain(&mut rx);
         assert!(keys.held(60) && keys.held(127) && !keys.held(64));
+        assert_eq!(keys.velocity(60), Some(100));
+        assert_eq!(keys.velocity(64), None);
         feed.release_all();
         assert!(!keys.held(60) && !keys.held(127));
         let off = |key| MidiEvent::NoteOff {

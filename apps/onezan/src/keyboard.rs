@@ -3,7 +3,9 @@
 //! Each key is drawn in layers, so the scale trainer can add to it without a redesign:
 //!
 //! 1. the key itself, white or black;
-//! 2. its state: in the current scale (a light tint), pressed (a strong colour);
+//! 2. its state: in the current scale (a light tint); pressed: a light blue tint, and a blue
+//!    fill rising from the front edge like a level meter, as high as the key was struck hard
+//!    (velocity 127 fills the key);
 //! 3. up to two fingering badges, one per hand: a numbered circle in the hand's colour
 //!    (right: blue, left: orange). They sit on the part of the key you see and touch: the lower
 //!    end of a black key, and the front of a white key below the black keys. When both hands use
@@ -23,7 +25,8 @@ pub const DEFAULT_RANGE: RangeInclusive<u8> = 36..=84;
 /// How one key looks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KeyLook {
-    pub pressed: bool,
+    /// How hard the key was struck (1 to 127) while it is held; `None` when it is up.
+    pub velocity: Option<u8>,
     pub in_scale: bool,
     /// The finger (1 to 5) of each hand on this key, if any.
     pub left: Option<u8>,
@@ -35,10 +38,12 @@ pub const LEFT_HAND: Color32 = Color32::from_rgb(217, 119, 6);
 
 const WHITE: Color32 = Color32::from_rgb(250, 250, 247);
 const WHITE_IN_SCALE: Color32 = Color32::from_rgb(254, 240, 199);
-const WHITE_PRESSED: Color32 = Color32::from_rgb(125, 180, 255);
+const WHITE_PRESSED: Color32 = Color32::from_rgb(214, 230, 255);
+const WHITE_METER: Color32 = Color32::from_rgb(59, 130, 246);
 const BLACK: Color32 = Color32::from_rgb(28, 28, 32);
 const BLACK_IN_SCALE: Color32 = Color32::from_rgb(92, 72, 36);
-const BLACK_PRESSED: Color32 = Color32::from_rgb(40, 96, 190);
+const BLACK_PRESSED: Color32 = Color32::from_rgb(36, 52, 84);
+const BLACK_METER: Color32 = Color32::from_rgb(96, 165, 250);
 const EDGE: Color32 = Color32::from_rgb(70, 70, 76);
 const LABEL: Color32 = Color32::from_rgb(130, 130, 136);
 
@@ -78,19 +83,14 @@ pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook
         let x = white_w.mul_add(f(i), area.left());
         let rect = Rect::from_min_size(pos2(x, top), vec2(white_w, height));
         let l = look(key);
-        let fill = if l.pressed {
-            WHITE_PRESSED
-        } else if l.in_scale {
-            WHITE_IN_SCALE
-        } else {
-            WHITE
-        };
-        painter.rect(
+        let base = if l.in_scale { WHITE_IN_SCALE } else { WHITE };
+        face(
+            &painter,
             rect.shrink2(vec2(0.5, 0.0)),
             3.0,
-            fill,
-            Stroke::new(1.0, EDGE),
-            StrokeKind::Inside,
+            base,
+            (WHITE_PRESSED, WHITE_METER),
+            l.velocity,
         );
         if key % 12 == 0 {
             painter.text(
@@ -98,7 +98,8 @@ pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook
                 Align2::CENTER_BOTTOM,
                 octave_name(key),
                 FontId::proportional(label_h * 0.85),
-                LABEL,
+                // On the meter's blue when pressed.
+                if l.velocity.is_some() { Color32::WHITE } else { LABEL },
             );
         }
         // Badges stack upwards from just above the octave label.
@@ -114,17 +115,31 @@ pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook
         let line = white_w.mul_add(f(below.saturating_add(1)), area.left());
         let rect = Rect::from_min_size(pos2(line - black_w / 2.0, top), vec2(black_w, black_h));
         let l = look(key);
-        let fill = if l.pressed {
-            BLACK_PRESSED
-        } else if l.in_scale {
-            BLACK_IN_SCALE
-        } else {
-            BLACK
-        };
-        painter.rect(rect, 2.0, fill, Stroke::new(1.0, EDGE), StrokeKind::Inside);
+        let base = if l.in_scale { BLACK_IN_SCALE } else { BLACK };
+        face(&painter, rect, 2.0, base, (BLACK_PRESSED, BLACK_METER), l.velocity);
         let r = badge_r.min(black_w * 0.45);
         badges(&painter, rect.center().x, rect.bottom() - r - 3.0, r, l);
     }
+}
+
+/// A key's surface: `base`, or when pressed the tint of `pressed` with its meter colour rising
+/// from the front edge in proportion to `velocity`; then the outline.
+fn face(
+    painter: &egui::Painter,
+    rect: Rect,
+    radius: f32,
+    base: Color32,
+    pressed: (Color32, Color32),
+    velocity: Option<u8>,
+) {
+    let (tint, meter) = pressed;
+    painter.rect_filled(rect, radius, if velocity.is_some() { tint } else { base });
+    if let Some(v) = velocity {
+        let height = rect.height() * f32::from(v.min(127)) / 127.0;
+        let fill = Rect::from_min_max(pos2(rect.left(), rect.bottom() - height), rect.max);
+        painter.rect_filled(fill, radius, meter);
+    }
+    painter.rect_stroke(rect, radius, Stroke::new(1.0, EDGE), StrokeKind::Inside);
 }
 
 /// The fingering badges of one key: right hand at `lowest`, left hand above it.

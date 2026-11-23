@@ -1996,6 +1996,9 @@ dependencies = [
  "log",
  "onezan-engine",
  "onezan-vst3-host",
+ "raw-window-handle",
+ "winit",
+ "x11rb",
 ]
 
 [[package]]
@@ -2014,6 +2017,7 @@ dependencies = [
 name = "onezan-vst3-host"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "libloading 0.8.9",
  "log",
  "thiserror 2.0.21",

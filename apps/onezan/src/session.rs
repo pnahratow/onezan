@@ -91,6 +91,10 @@ impl Session {
         })
     }
 
+    pub const fn plugin(&self) -> &Plugin {
+        &self.plugin
+    }
+
     /// The report section called `label`.
     pub fn section(&self, label: &str) -> Option<&Section> {
         self.report.iter().find(|s| s.label == label)

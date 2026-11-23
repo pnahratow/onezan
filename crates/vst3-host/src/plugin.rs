@@ -1,5 +1,6 @@
 //! One plugin instance: creation, wiring of component and controller, activation, processing.
 
+use crate::editor::Editor;
 use crate::events::{EventList, ParamChanges};
 use crate::host::HostApp;
 use crate::midi::MidiEvent;
@@ -37,6 +38,8 @@ pub struct Plugin {
     active: bool,
     /// Held by the live [`Processor`]; the plugin is not deactivated while it is.
     processor_token: Arc<()>,
+    /// Held by an open [`Editor`]; the plugin is not torn down while it is.
+    editor_token: Arc<()>,
 }
 
 /// Picks the class to load: the one with `class_id` (hex), else the first instrument, else the
@@ -100,6 +103,7 @@ impl Plugin {
             _module: module.clone(),
             active: false,
             processor_token: Arc::new(()),
+            editor_token: Arc::new(()),
         };
 
         // The edit controller is either the component itself or a separate class.
@@ -145,6 +149,20 @@ impl Plugin {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The plugin's own editor, ready to be embedded in a window of the app. Main thread. Drop
+    /// it before the plugin.
+    ///
+    /// # Errors
+    ///
+    /// When the plugin has no editor, or none for this platform's windows.
+    pub fn editor(&self) -> Result<Editor> {
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| Error::Editor("the plugin has no edit controller".into()))?;
+        Editor::new(controller, Arc::clone(&self.editor_token))
     }
 
     fn bus_count(&self, media: i32, dir: i32) -> i32 {
@@ -318,6 +336,13 @@ impl Plugin {
 
 impl Drop for Plugin {
     fn drop(&mut self) {
+        if Arc::strong_count(&self.editor_token) > 1 {
+            log::error!(
+                "vst3 {}: dropped while its editor is open; leaking the instance",
+                self.name
+            );
+            return;
+        }
         if Arc::strong_count(&self.processor_token) > 1 {
             // Terminating under a running processor would crash it: leak the instance instead.
             log::error!(

@@ -8,6 +8,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod embed;
 mod fingering;
 mod gui;
 mod keyboard;
