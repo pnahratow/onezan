@@ -2,3 +2,5 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+# Product names in doc comments that are not code; ".." keeps clippy's defaults.
+doc-valid-idents = ["PipeWire", ".."]

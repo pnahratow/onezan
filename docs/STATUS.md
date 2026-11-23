@@ -8,6 +8,14 @@ A desktop app for Linux and Windows. It reads a MIDI keyboard and plays it throu
 instrument. The long-term goal is a scale trainer: an on-screen keyboard with fingering numbers,
 a scale picker, a suggested learning order, a metronome and progress tracking.
 
+## Design rule: it just works
+
+Most users start the program once; if it does not work, they delete it. So every setting has an
+automatic default that picks the best option the system offers (output backend, buffer size,
+sample rate, MIDI port, plugin), with no setup and no questions. Manual choices (input and
+output device, and so on) come later, for people who know what they want or when the automatic
+choice fails, but they are never required.
+
 ## Decisions made
 
 | Topic | Decision |
@@ -36,7 +44,7 @@ All of these use `vst3` 0.3 and are licensed compatibly with GPL-3:
 The clones used in the first session were in a scratchpad folder that is cleared on reboot.
 Clone them again if needed.
 
-## What exists (built, clippy clean, not yet committed)
+## What exists
 
 ```
 Cargo.toml              workspace; edition 2024; GPL-3.0-or-later
@@ -56,7 +64,7 @@ apps/onezan/            CLI: list [--all] | midi | play [PLUGIN] [--midi PORT] [
 README.md, LICENSE (GPL-3.0), .gitignore
 ```
 
-`git init` has been run, but nothing is committed yet. Commit only when the user asks.
+Commit only when the user asks.
 
 ## Verified (2026-11-23)
 
@@ -66,16 +74,16 @@ README.md, LICENSE (GPL-3.0), .gitignore
 
 ## Not yet verified
 
-- **Live playing from a real MIDI keyboard.** None was connected; the only port is "Midi Through".
-- Latency when playing live (see the known issue below: ~43 ms buffers).
+- Live playing beyond "notes sound": sustain pedal (CC 64), pitch bend, mod wheel. The keyboard
+  (SWISSONIC EasyKeys49, passed through to the VM) works, but felt very sluggish on the old ALSA
+  path; JACK has not been tried by ear yet.
 - Anything running on Windows (it is only lint/type-checked).
 
 ## Next steps, in order
 
-1. Connect a keyboard; `cargo run -- midi`, then `cargo run -- play` and play it. Check that notes,
-   the sustain pedal (CC 64), pitch bend and the mod wheel work, and how the latency feels.
-2. Fix the latency: try cpal's `jack` feature (JACK host through pipewire-jack) and aim for
-   128-256 frame buffers.
+1. `cargo run -- play` with the keyboard on the JACK path: does it feel better? Check the sustain
+   pedal (CC 64), pitch bend and the mod wheel.
+2. Try the JACK path on the real (non-VM) machine and see what block size it gets.
 3. Unit tests for the parts that can be tested without a plugin (they are thin now: one MIDI
    parse test). Candidates: `Callback::run` interleaving, `render_offline` event placement,
    `ParamChanges` and `EventList` capacity limits, `util` conversions.
@@ -112,13 +120,34 @@ README.md, LICENSE (GPL-3.0), .gitignore
   on scales already learned. Allow free selection as well.
 - Metronome and latency: timestamp on the audio thread; never use UI timers.
 
-## Known issue: audio latency on Linux (2026-11-23)
+## Audio output and latency (2026-11-23)
 
-Through cpal 0.16's ALSA backend on PipeWire, asking for a fixed buffer size (256, 512 and 1024
-all tried) makes every `alsa::poll()` return POLLERR, and nothing plays. The engine now uses the
-device's default buffer instead. That works, but callbacks are about 1880 frames (~43 ms at
-44.1 kHz), which is too slow for playing live. `PIPEWIRE_LATENCY` does not change it. The
-candidate fix is cpal's JACK host via pipewire-jack (installed): cpal's `jack` feature.
+The engine picks the output by itself (`pick_output` in `crates/engine`):
+
+1. **JACK** on Linux, when a server answers. On PipeWire systems that is `pipewire-jack`: no
+   jackd, nothing to set up. The app asks PipeWire for 256-frame blocks (`PIPEWIRE_LATENCY`, set
+   at the start of `main` unless the user set it) and PipeWire grants that, or its configured
+   minimum (`default.clock.min-quantum`) if that is larger. `libjack` is loaded at runtime, so
+   the binary also starts without it.
+2. Otherwise the platform default: **ALSA** on Linux, WASAPI on Windows. Always the backend's own
+   buffer size: asking cpal 0.16's ALSA backend for a fixed size through PipeWire's ALSA plugin
+   makes every poll return POLLERR, and nothing plays.
+
+48 kHz is preferred (PipeWire's graph rate, so nothing is resampled).
+
+**Startup report.** `play` (and `render`, for the plugin) prints what it uses for the plugin, MIDI
+input and audio output, why, every alternative with the reason it was not used, and how to choose
+differently. The block size is the one measured in the audio callback, with a note when the system
+did not grant the size asked for. The selection code returns this as `Considered { name, verdict,
+why }` lists (`onezan_engine::choose_midi_port`, `AudioOut::considered`), so a GUI can show the
+same later. Logging defaults to `warn` so the report stays readable; `RUST_LOG=info` for details.
+
+Measured in the dev VM (QEMU, emulated Intel HDA; its PipeWire has min-quantum 1024):
+JACK 1024 frames = 21.3 ms per block; ALSA fallback 2048 frames = 42.7 ms. With JACK disabled
+(`PIPEWIRE_NOJACK=1`) the fallback works. On the user's real machine latency is noticeably better.
+
+Rough edges: the JACK client is called `cpal_client_out` (cpal 0.16 fixes the name), and when
+JACK is unavailable pipewire-jack prints two warnings to stderr before the fallback.
 
 ## Lints (2026-11-23)
 

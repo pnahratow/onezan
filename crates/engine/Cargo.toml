@@ -12,5 +12,10 @@ rtrb.workspace = true
 anyhow.workspace = true
 log.workspace = true
 
+# JACK, which on PipeWire systems (pipewire-jack) gives the graph's own block size: the lowest
+# latency available. libjack is loaded at runtime; without it the engine falls back to ALSA.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { workspace = true, features = ["jack"] }
+
 [lints]
 workspace = true

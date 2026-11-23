@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use onezan_engine::{AudioOut, midi_queue};
+use onezan_engine::{AudioOut, Considered, Verdict, midi_queue};
 use onezan_vst3_host::{MidiEvent, Plugin, PluginInfo};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -44,7 +44,9 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // SAFETY: first thing in main; no other thread exists yet.
+    unsafe { onezan_engine::request_low_latency() };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     match Cli::parse().cmd {
         Cmd::List { all } => {
             list(all);
@@ -93,29 +95,57 @@ fn list(all: bool) {
     }
 }
 
-/// Resolves the plugin argument to (bundle, class id).
-fn resolve(arg: Option<&str>) -> Result<(PathBuf, Option<String>)> {
+/// Resolves the plugin argument to (bundle, class id), with the verdict on each instrument.
+fn resolve(arg: Option<&str>) -> Result<(PathBuf, Option<String>, Vec<Considered>)> {
     if let Some(a) = arg {
         let p = Path::new(a);
         if p.exists() {
-            return Ok((p.to_path_buf(), None));
+            let c = Considered {
+                name: a.to_string(),
+                verdict: Verdict::Used,
+                why: "the path given".into(),
+            };
+            return Ok((p.to_path_buf(), None, vec![c]));
         }
     }
     let plugins = installed();
     let pick = arg.map_or_else(
-        || plugins.iter().find(|p| p.is_instrument()),
+        || plugins.iter().position(PluginInfo::is_instrument),
         |a| {
             let q = a.to_lowercase();
-            plugins.iter().find(|p| p.class_id.eq_ignore_ascii_case(a)).or_else(|| {
-                plugins
-                    .iter()
-                    .filter(|p| p.name.to_lowercase().contains(&q))
-                    .max_by_key(|p| (p.is_instrument(), p.name.len() == a.len()))
-            })
+            plugins
+                .iter()
+                .position(|p| p.class_id.eq_ignore_ascii_case(a))
+                .or_else(|| {
+                    plugins
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.name.to_lowercase().contains(&q))
+                        .max_by_key(|(_, p)| (p.is_instrument(), p.name.len() == a.len()))
+                        .map(|(i, _)| i)
+                })
         },
     );
-    match pick {
-        Some(p) => Ok((p.bundle.clone(), Some(p.class_id.clone()))),
+    let considered = plugins
+        .iter()
+        .enumerate()
+        .filter(|&(i, p)| p.is_instrument() || Some(i) == pick)
+        .map(|(i, p)| {
+            let (verdict, why) = match (Some(i) == pick, arg) {
+                (true, Some(a)) => (Verdict::Used, format!("matches \"{a}\"")),
+                (true, None) => (Verdict::Used, "the first installed instrument".to_string()),
+                (false, Some(a)) => (Verdict::NotUsed, format!("does not match \"{a}\"")),
+                (false, None) => (Verdict::NotUsed, "another instrument was picked first".to_string()),
+            };
+            Considered {
+                name: format!("{} ({})", p.name, p.vendor),
+                verdict,
+                why,
+            }
+        })
+        .collect();
+    match pick.and_then(|i| plugins.get(i)) {
+        Some(p) => Ok((p.bundle.clone(), Some(p.class_id.clone()), considered)),
         None if arg.is_none() => bail!("no VST3 instrument installed (try `onezan list --all`)"),
         None => bail!(
             "no installed plugin matches {:?} (see `onezan list`)",
@@ -124,38 +154,83 @@ fn resolve(arg: Option<&str>) -> Result<(PathBuf, Option<String>)> {
     }
 }
 
-fn load(arg: Option<&str>) -> Result<Plugin> {
-    let (bundle, class) = resolve(arg)?;
+fn load(arg: Option<&str>) -> Result<(Plugin, Vec<Considered>)> {
+    let (bundle, class, considered) = resolve(arg)?;
     let plugin = Plugin::load(&bundle, class.as_deref()).with_context(|| format!("loading {}", bundle.display()))?;
-    println!("loaded {} ({})", plugin.name(), bundle.display());
-    Ok(plugin)
+    Ok((plugin, considered))
+}
+
+/// Prints one section of the startup report: what is used (with `detail`), why, the
+/// alternatives with the reason each was not used, and `hint` (how to choose differently).
+fn report(label: &str, considered: &[Considered], detail: &str, hint: &str) {
+    let used = considered.iter().find(|c| c.verdict == Verdict::Used);
+    match used {
+        Some(u) if detail.is_empty() => println!("{label:<10}{}", u.name),
+        Some(u) => println!("{label:<10}{}, {detail}", u.name),
+        None => println!("{label:<10}none"),
+    }
+    if let Some(u) = used {
+        println!("{:<10}  why: {}", "", u.why);
+    }
+    for c in considered.iter().filter(|c| c.verdict != Verdict::Used) {
+        let state = if c.verdict == Verdict::Unavailable {
+            "unavailable"
+        } else {
+            "not used"
+        };
+        println!("{:<10}  also: {} ({state}: {})", "", c.name, c.why);
+    }
+    if !hint.is_empty() {
+        println!("{:<10}  {hint}", "");
+    }
+}
+
+/// The audio line's settings: rate and the block size really in use, with its latency, and a
+/// note when the system did not grant the block size asked for.
+fn audio_detail(audio: &AudioOut) -> String {
+    let ms = |n: u32| f64::from(n) * 1000.0 / f64::from(audio.sample_rate);
+    let block = audio.block_frames(Duration::from_secs(1)).or(audio.buffer_frames);
+    let block_text = block.map_or_else(
+        || "block size unknown".to_string(),
+        |n| format!("block {n} frames ({:.1} ms)", ms(n)),
+    );
+    let not_granted = match (block, audio.requested_frames) {
+        (Some(n), Some(asked)) if n > asked => {
+            format!(
+                "; asked for {asked} ({:.1} ms), the system's minimum is higher",
+                ms(asked)
+            )
+        }
+        _ => String::new(),
+    };
+    format!("{} Hz, {block_text}{not_granted}", audio.sample_rate)
 }
 
 /// C major, one octave up and down, from middle C.
 const SCALE: [u8; 15] = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60];
 
 fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool) -> Result<()> {
-    let mut plugin = load(plugin_arg)?;
+    let (mut plugin, plugins) = load(plugin_arg)?;
+    report(
+        "plugin",
+        &plugins,
+        "",
+        "choose another with `onezan play NAME` (see `onezan list`)",
+    );
     let (midi_tx, midi_rx) = midi_queue();
     let (demo_tx, demo_rx) = midi_queue();
 
-    let midi_in = onezan_engine::open_midi_input(midi_arg, midi_tx)?;
+    let (midi_in, ports) = onezan_engine::open_midi_input(midi_arg, midi_tx)?;
+    report("MIDI in", &ports, "", "choose another with --midi NAME");
     match (&midi_in, midi_arg) {
-        (Some(m), _) => println!("MIDI input: {}", m.port_name),
+        (Some(_), _) => {}
         (None, Some(q)) => bail!("no MIDI input port matches {q:?} (see `onezan midi`)"),
-        (None, None) if !demo => bail!("no MIDI keyboard found (see `onezan midi`, or try --demo)"),
-        (None, None) => println!("no MIDI keyboard found; playing the demo only"),
+        (None, None) if !demo => bail!("no MIDI keyboard found (connect one, or try --demo)"),
+        (None, None) => println!("{:<10}  no keyboard; playing the demo only", ""),
     }
 
     let audio = AudioOut::start(&mut plugin, vec![midi_rx, demo_rx])?;
-    println!(
-        "audio: {} @ {} Hz, buffer {}",
-        audio.device_name,
-        audio.sample_rate,
-        audio
-            .buffer_frames
-            .map_or_else(|| "device default".to_string(), |n| format!("{n} frames"))
-    );
+    report("audio out", &audio.considered, &audio_detail(&audio), "");
 
     let demo_thread = demo.then(|| std::thread::spawn(move || play_scale(demo_tx)));
     if let Some(t) = demo_thread {
@@ -194,7 +269,8 @@ fn play_scale(mut tx: onezan_engine::Producer<MidiEvent>) {
 }
 
 fn render(plugin_arg: Option<&str>, sample_rate: u32) -> Result<()> {
-    let mut plugin = load(plugin_arg)?;
+    let (mut plugin, plugins) = load(plugin_arg)?;
+    report("plugin", &plugins, "", "");
     // A quarter second per note, sounding for 90% of it; two silent notes' worth at the end.
     let step = usize::try_from(sample_rate / 4).context("sample rate too high")?;
     let sounding = step.saturating_mul(9) / 10;
