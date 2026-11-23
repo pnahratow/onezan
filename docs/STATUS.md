@@ -58,20 +58,27 @@ README.md, LICENSE (GPL-3.0), .gitignore
 
 `git init` has been run, but nothing is committed yet. Commit only when the user asks.
 
+## Verified (2026-11-23)
+
+- Surge XT is installed (`/usr/lib/vst3/Surge XT.vst3`); `list` finds it.
+- `render` produces signal (peak about -9 dBFS, not silence).
+- `play --demo`: the user heard the scale through Surge XT.
+
 ## Not yet verified
 
-- **No sound has come out yet.** No VST3 plugin was installed. The user was installing
-  `surge-xt` (`sudo pacman -Syu surge-xt`; at the `vst3-host` provider prompt the answer is **4 = carla**).
-- No MIDI keyboard was connected. The only port was "Midi Through".
-- Windows has never been built or tested.
+- **Live playing from a real MIDI keyboard.** None was connected; the only port is "Midi Through".
+- Latency when playing live (see the known issue below: ~43 ms buffers).
+- Anything running on Windows (it is only lint/type-checked).
 
 ## Next steps, in order
 
-1. Check that Surge XT is installed: `ls /usr/lib/vst3`.
-2. `cargo run -- list`, then `cargo run -- render "Surge XT"`. It must report a peak level, not "silence".
-   If it crashes or is silent, debug against Carla, which can host the same plugin.
-3. `cargo run -- play "Surge XT" --demo` to hear the scale. Then, with a keyboard,
-   `cargo run -- play "Surge XT"`.
+1. Connect a keyboard; `cargo run -- midi`, then `cargo run -- play` and play it. Check that notes,
+   the sustain pedal (CC 64), pitch bend and the mod wheel work, and how the latency feels.
+2. Fix the latency: try cpal's `jack` feature (JACK host through pipewire-jack) and aim for
+   128-256 frame buffers.
+3. Unit tests for the parts that can be tested without a plugin (they are thin now: one MIDI
+   parse test). Candidates: `Callback::run` interleaving, `render_offline` event placement,
+   `ParamChanges` and `EventList` capacity limits, `util` conversions.
 4. **Plugin editor window** (so the user can pick sounds): IPlugView, IPlugFrame, and IRunLoop
    on Linux (the plugin's timers and file descriptors must be serviced on the UI thread).
    Linux needs an X11 window, which runs under XWayland on Hyprland. Windows needs an HWND.
@@ -87,7 +94,8 @@ README.md, LICENSE (GPL-3.0), .gitignore
 ## Known gaps and shortcuts in the current code
 
 - All MIDI events take effect at the start of the audio block (sampleOffset 0). That adds
-  jitter of up to one buffer (about 5 ms at 256 frames and 48 kHz). Acceptable for now.
+  jitter of up to one buffer: about 5 ms at 256 frames, but ~43 ms with the current default
+  buffer (see the latency issue below).
 - The controller is not synced with the component's state after loading (needs IBStream; step 5).
 - `restartComponent` and `performEdit` from the plugin are ignored.
 - Plugins run in our own process, so a plugin crash takes the app down.
