@@ -68,25 +68,33 @@ Commit only when the user asks.
 
 ## Verified (2026-11-23)
 
-- Surge XT is installed (`/usr/lib/vst3/Surge XT.vst3`); `list` finds it.
-- `render` produces signal (peak about -9 dBFS, not silence).
-- `play --demo`: the user heard the scale through Surge XT.
+- Surge XT is installed (`/usr/lib/vst3/Surge XT.vst3`); `list` finds it; `render` produces signal.
+- `play --demo` sounds. By hand with the keyboard (SWISSONIC EasyKeys49): notes, sustain pedal,
+  pitch bend, fast repeated notes and big chords work; quitting with Enter and Ctrl+C is clean.
+- The user's real machine (Linux Mint, PipeWire 1.0.5): ALSA gives 1280-frame blocks (26.7 ms),
+  noticeable but okay; with pipewire-jack installed, `pw-jack onezan play` gets JACK. The dev VM gives 1024 frames on JACK.
+- Offline checks against the installed plugin (`crates/engine/tests/plugin.rs`, skipped without
+  one): a note at frame N sounds from N (not from its block start); a released note goes silent;
+  the sustain pedal holds and releases.
 
-## Not yet verified
+## Not yet verified / known problems
 
-- Live playing beyond "notes sound": sustain pedal (CC 64), pitch bend, mod wheel. The keyboard
-  (SWISSONIC EasyKeys49, passed through to the VM) works, but felt very sluggish on the old ALSA
-  path; JACK has not been tried by ear yet.
+- **Replugging the keyboard leaves it silent**: the MIDI port is opened once at start-up. Same for
+  plugging a keyboard in after starting.
+- The mod wheel has no audible effect in Surge's default patch; unclear what it should do. Later.
+- The octave button on a held note: set aside by the user for now.
+- Exact MIDI timing has only been checked offline and by the report; no system here gives short
+  enough blocks to hear it (it is picked at 11 ms or less).
 - Anything running on Windows (it is only lint/type-checked).
 
 ## Next steps, in order
 
-1. `cargo run -- play` with the keyboard on the JACK path: does it feel better? Check the sustain
-   pedal (CC 64), pitch bend and the mod wheel.
-2. Try the JACK path on the real (non-VM) machine and see what block size it gets.
-3. Unit tests for the parts that can be tested without a plugin (they are thin now: one MIDI
-   parse test). Candidates: `Callback::run` interleaving, `render_offline` event placement,
-   `ParamChanges` and `EventList` capacity limits, `util` conversions.
+1. Reconnect the MIDI keyboard when it is unplugged and plugged back, and pick up a keyboard
+   connected after start-up (watch the port list; "just works").
+2. Try `pipewire-jack` on the real machine (if it runs PipeWire), and compare `--midi-timing`
+   modes by ear where blocks are short.
+3. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
+   installed, so the first start always makes sound.
 4. **Plugin editor window** (so the user can pick sounds): IPlugView, IPlugFrame, and IRunLoop
    on Linux (the plugin's timers and file descriptors must be serviced on the UI thread).
    Linux needs an X11 window, which runs under XWayland on Hyprland. Windows needs an HWND.
@@ -101,9 +109,8 @@ Commit only when the user asks.
 
 ## Known gaps and shortcuts in the current code
 
-- All MIDI events take effect at the start of the audio block (sampleOffset 0). That adds
-  jitter of up to one buffer: about 5 ms at 256 frames, but ~43 ms with the current default
-  buffer (see the latency issue below).
+- Live MIDI is stamped with `Instant::now()` when midir's callback runs, not with the driver's
+  timestamp (midir's is on another clock, and differs per platform). Good to well under 1 ms.
 - The controller is not synced with the component's state after loading (needs IBStream; step 5).
 - `restartComponent` and `performEdit` from the plugin are ignored.
 - Plugins run in our own process, so a plugin crash takes the app down.
@@ -133,6 +140,13 @@ The engine picks the output by itself (`pick_output` in `crates/engine`):
    buffer size: asking cpal 0.16's ALSA backend for a fixed size through PipeWire's ALSA plugin
    makes every poll return POLLERR, and nothing plays.
 
+**Debian, Ubuntu and Mint** keep PipeWire's `libjack` out of the library path
+(`/usr/lib/<arch>/pipewire-0.3/jack/`; the location is a per-distro build option), so the app only
+gets JACK when started through `pw-jack`. Verified on the user's Mint machine (PipeWire 1.0.5). By
+the user's decision nothing is done automatically: when the output is not JACK but `pw-jack` is in
+`$PATH`, the report's JACK line says to start with `pw-jack <the same command>`. (Considered and
+not done: re-running through `pw-jack` automatically, or preloading the library from a guessed path.)
+
 48 kHz is preferred (PipeWire's graph rate, so nothing is resampled).
 
 **Startup report.** `play` (and `render`, for the plugin) prints what it uses for the plugin, MIDI
@@ -148,6 +162,16 @@ JACK 1024 frames = 21.3 ms per block; ALSA fallback 2048 frames = 42.7 ms. With 
 
 Rough edges: the JACK client is called `cpal_client_out` (cpal 0.16 fixes the name), and when
 JACK is unavailable pipewire-jack prints two warnings to stderr before the fallback.
+
+## MIDI timing (2026-11-23)
+
+`crates/engine/src/timing.rs`. Each live event carries its arrival time. The audio callback maps
+the interval since the previous callback onto the block (**exact**: notes keep their spacing, one
+block later) or puts everything at frame 0 (**immediate**: no extra delay, 0 to 1 block late,
+uneven). `--midi-timing auto` (default) picks exact for blocks of at most 11 ms, else immediate,
+per callback, so it follows block size changes. The plugin gets each event at its sample
+(`sampleOffset`, and the parameter point offset for CCs). Events from several sources are merged
+with a stable insertion sort (no allocation). `play` reports the mode and why.
 
 ## Lints (2026-11-23)
 

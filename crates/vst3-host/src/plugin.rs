@@ -424,16 +424,18 @@ unsafe impl Send for Processor {}
 /// MIDI controller → parameter id, `[channel][controller]`, 16 channels.
 type MidiMap = [[Option<u32>; MAP_CTRLS]];
 
-fn note_event(r#type: Event_::EventTypes) -> Event {
+fn note_event(r#type: Event_::EventTypes, offset: i32) -> Event {
     // SAFETY: plain data (numbers and a union of plain structs); all-zero is valid.
     let mut e: Event = unsafe { std::mem::zeroed() };
+    e.sampleOffset = offset;
     e.r#type = venum(r#type);
     e.flags = venum(Event_::EventFlags_::kIsLive);
     e
 }
 
 impl Processor {
-    fn queue_event(&self, ev: MidiEvent) {
+    /// Hands `ev` to the plugin at frame `offset` of the coming `process` call.
+    fn queue_event(&self, offset: i32, ev: MidiEvent) {
         let map = |ch: u8, ctrl: u8| {
             self.midi_map
                 .get(usize::from(ch & 0x0F))
@@ -443,7 +445,7 @@ impl Processor {
         };
         match ev {
             MidiEvent::NoteOn { channel, key, velocity } if self.has_events => {
-                let mut e = note_event(Event_::EventTypes_::kNoteOnEvent);
+                let mut e = note_event(Event_::EventTypes_::kNoteOnEvent, offset);
                 e.__field0.noteOn = NoteOnEvent {
                     channel: i16::from(channel),
                     pitch: i16::from(key),
@@ -455,7 +457,7 @@ impl Processor {
                 self.in_events.push(e);
             }
             MidiEvent::NoteOff { channel, key, velocity } if self.has_events => {
-                let mut e = note_event(Event_::EventTypes_::kNoteOffEvent);
+                let mut e = note_event(Event_::EventTypes_::kNoteOffEvent, offset);
                 e.__field0.noteOff = NoteOffEvent {
                     channel: i16::from(channel),
                     pitch: i16::from(key),
@@ -466,7 +468,7 @@ impl Processor {
                 self.in_events.push(e);
             }
             MidiEvent::PolyPressure { channel, key, pressure } if self.has_events => {
-                let mut e = note_event(Event_::EventTypes_::kPolyPressureEvent);
+                let mut e = note_event(Event_::EventTypes_::kPolyPressureEvent, offset);
                 e.__field0.polyPressure = PolyPressureEvent {
                     channel: i16::from(channel),
                     pitch: i16::from(key),
@@ -481,26 +483,27 @@ impl Processor {
                 value,
             } => {
                 if let Some(id) = map(channel, controller) {
-                    self.in_params.add(id, 0, f64::from(value) / 127.0);
+                    self.in_params.add(id, offset, f64::from(value) / 127.0);
                 }
             }
             MidiEvent::ChannelPressure { channel, pressure } => {
                 if let Some(id) = map(channel, CTRL_AFTERTOUCH) {
-                    self.in_params.add(id, 0, f64::from(pressure) / 127.0);
+                    self.in_params.add(id, offset, f64::from(pressure) / 127.0);
                 }
             }
             MidiEvent::PitchBend { channel, value } => {
                 if let Some(id) = map(channel, CTRL_PITCH_BEND) {
-                    self.in_params.add(id, 0, f64::from(value) / 16383.0);
+                    self.in_params.add(id, offset, f64::from(value) / 16383.0);
                 }
             }
             _ => {}
         }
     }
 
-    /// Renders `left.len()` frames into `left`/`right` (equal lengths). `events` take effect at
-    /// the start of the block. Real-time safe: no allocation, no blocking.
-    pub fn process(&mut self, events: &[MidiEvent], left: &mut [f32], right: &mut [f32]) {
+    /// Renders `left.len()` frames into `left`/`right` (equal lengths). Each event is
+    /// `(frame, event)`: it takes effect at that frame of `left`, the last frame if past the end.
+    /// `events` must be sorted by frame. Real-time safe: no allocation, no blocking.
+    pub fn process(&mut self, events: &[(usize, MidiEvent)], left: &mut [f32], right: &mut [f32]) {
         if !self.processing {
             // Many plugins return kNotImplemented here; that is fine.
             // SAFETY: valid, active processor.
@@ -508,15 +511,20 @@ impl Processor {
             self.processing = true;
         }
         let block = self.max_frames.max(1);
-        for (i, (l, r_out)) in left.chunks_mut(block).zip(right.chunks_mut(block)).enumerate() {
+        let total = left.len().min(right.len());
+        let mut pending = events.iter().peekable();
+        let mut start = 0usize;
+        for (l, r_out) in left.chunks_mut(block).zip(right.chunks_mut(block)) {
             let frames = l.len().min(r_out.len());
+            let end = start.saturating_add(frames);
             self.in_events.clear();
             self.in_params.clear();
-            if i == 0 {
-                for &ev in events {
-                    self.queue_event(ev);
-                }
+            // This chunk's events; the last chunk also takes any that are past the end.
+            while let Some(&(at, ev)) = pending.next_if(|(at, _)| *at < end || end >= total) {
+                let offset = at.min(end.saturating_sub(1)).saturating_sub(start);
+                self.queue_event(int32(offset), ev);
             }
+            start = end;
             self.out_events.clear();
             self.out_params.clear();
             self.inputs.refresh();

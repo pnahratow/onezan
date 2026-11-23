@@ -1,8 +1,8 @@
 //! onezan: play your MIDI keyboard through a VST3 instrument.
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
-use onezan_engine::{AudioOut, Considered, Verdict, midi_queue};
+use clap::{Parser, Subcommand, ValueEnum};
+use onezan_engine::{AudioOut, Considered, MidiTiming, TimedEvent, Verdict, midi_queue};
 use onezan_vst3_host::{MidiEvent, Plugin, PluginInfo};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,24 @@ use std::time::Duration;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// `--midi-timing` (the engine's [`MidiTiming`], which knows nothing of clap).
+#[derive(Clone, Copy, ValueEnum)]
+enum Timing {
+    Auto,
+    Exact,
+    Immediate,
+}
+
+impl From<Timing> for MidiTiming {
+    fn from(t: Timing) -> Self {
+        match t {
+            Timing::Auto => Self::Auto,
+            Timing::Exact => Self::Exact,
+            Timing::Immediate => Self::Immediate,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -34,6 +52,10 @@ enum Cmd {
         /// Also play a C major scale through the plugin, to check the sound without a keyboard.
         #[arg(long)]
         demo: bool,
+        /// How notes are placed in the audio block: exact (steady spacing, one block later),
+        /// immediate (next block, uneven), or auto (exact for short blocks).
+        #[arg(long, value_enum, default_value_t = Timing::Auto)]
+        midi_timing: Timing,
     },
     /// Render a C major scale offline and report the output level (no audio device needed).
     Render {
@@ -62,7 +84,12 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Play { plugin, midi, demo } => play(plugin.as_deref(), midi.as_deref(), demo),
+        Cmd::Play {
+            plugin,
+            midi,
+            demo,
+            midi_timing,
+        } => play(plugin.as_deref(), midi.as_deref(), demo, midi_timing.into()),
         Cmd::Render { plugin, sample_rate } => render(plugin.as_deref(), sample_rate),
     }
 }
@@ -209,7 +236,7 @@ fn audio_detail(audio: &AudioOut) -> String {
 /// C major, one octave up and down, from middle C.
 const SCALE: [u8; 15] = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60];
 
-fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool) -> Result<()> {
+fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool, timing: MidiTiming) -> Result<()> {
     let (mut plugin, plugins) = load(plugin_arg)?;
     report(
         "plugin",
@@ -229,8 +256,11 @@ fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool) -> Result<
         (None, None) => println!("{:<10}  no keyboard; playing the demo only", ""),
     }
 
-    let audio = AudioOut::start(&mut plugin, vec![midi_rx, demo_rx])?;
+    let audio = AudioOut::start(&mut plugin, vec![midi_rx, demo_rx], timing)?;
     report("audio out", &audio.considered, &audio_detail(&audio), "");
+    if let Some(t) = audio.midi_timing() {
+        report("timing", &t, "", "choose with --midi-timing exact|immediate|auto");
+    }
 
     let demo_thread = demo.then(|| std::thread::spawn(move || play_scale(demo_tx)));
     if let Some(t) = demo_thread {
@@ -250,20 +280,20 @@ fn play(plugin_arg: Option<&str>, midi_arg: Option<&str>, demo: bool) -> Result<
     Ok(())
 }
 
-fn play_scale(mut tx: onezan_engine::Producer<MidiEvent>) {
+fn play_scale(mut tx: onezan_engine::Producer<TimedEvent>) {
     let step = Duration::from_millis(250);
     for &key in &SCALE {
-        let _ = tx.push(MidiEvent::NoteOn {
+        let _ = tx.push(TimedEvent::now(MidiEvent::NoteOn {
             channel: 0,
             key,
             velocity: 90,
-        });
+        }));
         std::thread::sleep(step.mul_f32(0.9));
-        let _ = tx.push(MidiEvent::NoteOff {
+        let _ = tx.push(TimedEvent::now(MidiEvent::NoteOff {
             channel: 0,
             key,
             velocity: 64,
-        });
+        }));
         std::thread::sleep(step.mul_f32(0.1));
     }
 }

@@ -1,25 +1,32 @@
 //! The real-time part of onezan: MIDI in, a plugin in the middle, audio out.
 //!
-//! MIDI arrives on midir's thread and is passed to the audio callback through lock-free SPSC
-//! queues (`rtrb`); the callback drains them at the start of each block and runs the plugin.
+//! MIDI arrives on midir's thread, is stamped with its arrival time and passed to the audio
+//! callback through lock-free SPSC queues (`rtrb`); the callback drains them at the start of each
+//! block, places each event in the block (see [`timing`]) and runs the plugin.
+
+pub mod timing;
 
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use onezan_vst3_host::{MidiEvent, Plugin, Processor};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 pub use rtrb::{Consumer, Producer, RingBuffer};
+pub use timing::{MidiTiming, TimedEvent};
 
 /// Capacity of each MIDI queue (events between two audio blocks).
 pub const QUEUE_CAP: usize = 1024;
-/// The largest block the plugin is configured for; bigger device buffers are split.
+/// The largest block the plugin is configured for; the plugin processes bigger ones in parts.
 const MAX_FRAMES: usize = 1024;
+/// The largest audio callback handled in one piece (JACK's largest common block); bigger ones
+/// are split.
+const MAX_CALLBACK_FRAMES: usize = 8192;
 
 /// A new MIDI event queue: the producer goes to a source, the consumer to [`AudioOut::start`].
 #[must_use]
-pub fn midi_queue() -> (Producer<MidiEvent>, Consumer<MidiEvent>) {
+pub fn midi_queue() -> (Producer<TimedEvent>, Consumer<TimedEvent>) {
     RingBuffer::new(QUEUE_CAP)
 }
 
@@ -116,7 +123,7 @@ pub fn choose_midi_port(ports: &[String], query: Option<&str>) -> (Option<usize>
 /// # Errors
 ///
 /// When the system MIDI client cannot be created or the port cannot be opened.
-pub fn open_midi_input(query: Option<&str>, mut tx: Producer<MidiEvent>) -> Result<(Option<MidiIn>, Vec<Considered>)> {
+pub fn open_midi_input(query: Option<&str>, mut tx: Producer<TimedEvent>) -> Result<(Option<MidiIn>, Vec<Considered>)> {
     let mut input = midir::MidiInput::new("onezan")?;
     input.ignore(midir::Ignore::All);
     let (ports, names): (Vec<midir::MidiInputPort>, Vec<String>) = input
@@ -134,9 +141,10 @@ pub fn open_midi_input(query: Option<&str>, mut tx: Producer<MidiEvent>) -> Resu
             port,
             "onezan-in",
             move |_stamp, bytes, ()| {
+                // Stamped on arrival; midir's own stamp is on another clock (and per platform).
                 if let Some(ev) = MidiEvent::parse(bytes) {
                     // A full queue drops the event; the audio thread is not keeping up anyway.
-                    let _ = tx.push(ev);
+                    let _ = tx.push(TimedEvent::now(ev));
                 }
             },
             (),
@@ -185,6 +193,9 @@ pub struct AudioOut {
     pub considered: Vec<Considered>,
     /// Frames in the latest audio callback, 0 until [`SETTLE_CALLBACKS`] have run.
     block: Arc<AtomicU32>,
+    /// The MIDI timing setting, and the mode it resolved to in the latest callback.
+    timing: MidiTiming,
+    applied: Arc<AtomicU8>,
     stream: cpal::Stream,
 }
 
@@ -223,11 +234,7 @@ fn pick_output() -> Result<(cpal::HostId, cpal::Device, Vec<Considered>)> {
             ));
             return Ok((cpal::HostId::Jack, d, considered));
         }
-        let jack_missing = Considered::new(
-            "JACK",
-            Verdict::Unavailable,
-            "no JACK server answered; on PipeWire systems the pipewire-jack package provides one",
-        );
+        let jack_missing = Considered::new("JACK", Verdict::Unavailable, jack_missing_why(in_path("pw-jack")));
         let device = default.context("no audio output device (and no JACK server)")?;
         let considered = vec![
             jack_missing,
@@ -245,6 +252,35 @@ fn pick_output() -> Result<(cpal::HostId, cpal::Device, Vec<Considered>)> {
         )];
         Ok((host.id(), device, considered))
     }
+}
+
+/// Why JACK is not used, when no server answered.
+///
+/// Some distributions (Debian, Ubuntu, Mint) keep PipeWire's `libjack` out of the library path, so
+/// programs reach it only when started through `pw-jack`. Nothing is done automatically: the
+/// report only says so.
+#[cfg(target_os = "linux")]
+fn jack_missing_why(pw_jack: bool) -> String {
+    if pw_jack {
+        let args: Vec<String> = std::env::args().collect();
+        format!(
+            "no JACK server answered, but pw-jack is installed: for lower latency, start with `pw-jack {}`",
+            args.join(" ")
+        )
+    } else {
+        "no JACK server answered; on PipeWire systems the pipewire-jack package provides one".to_string()
+    }
+}
+
+/// Whether an executable `name` is in `$PATH`.
+#[cfg(target_os = "linux")]
+fn in_path(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            std::fs::metadata(dir.join(name)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -290,13 +326,13 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 
 impl AudioOut {
     /// Opens the best output (see [`pick_output`]), starts `plugin` at its sample rate and plays
-    /// it, feeding it the events from `inputs`.
+    /// it, feeding it the events from `inputs`, placed in each block as `timing` says.
     ///
     /// # Errors
     ///
     /// When there is no usable output device (32-bit float), the plugin cannot start, or the
     /// stream cannot be opened.
-    pub fn start(plugin: &mut Plugin, inputs: Vec<Consumer<MidiEvent>>) -> Result<Self> {
+    pub fn start(plugin: &mut Plugin, inputs: Vec<Consumer<TimedEvent>>, timing: MidiTiming) -> Result<Self> {
         let (host_id, device, considered) = pick_output()?;
         let device_name = device.name().unwrap_or_else(|_| "unknown device".into());
         let supported = pick_config(&device)?;
@@ -313,7 +349,12 @@ impl AudioOut {
 
         let processor = plugin.start(f64::from(sample_rate.0), MAX_FRAMES)?;
         let block = Arc::new(AtomicU32::new(0));
-        let mut cb = Callback::new(processor, inputs, channels, block.clone());
+        let applied = Arc::new(AtomicU8::new(0));
+        let report = Report {
+            block: block.clone(),
+            applied: applied.clone(),
+        };
+        let mut cb = Callback::new(processor, inputs, channels, sample_rate.0, timing, report);
         let stream = device
             .build_output_stream(
                 &config,
@@ -340,8 +381,24 @@ impl AudioOut {
             sample_rate: sample_rate.0,
             buffer_frames,
             block,
+            timing,
+            applied,
             stream,
         })
+    }
+
+    /// The MIDI timing report: the setting, what it resolved to for the current block, why, and
+    /// the alternative. Call after [`AudioOut::block_frames`] has returned a size.
+    #[must_use]
+    pub fn midi_timing(&self) -> Option<Vec<Considered>> {
+        let applied = match self.applied.load(Ordering::Relaxed) {
+            APPLIED_EXACT => MidiTiming::Exact,
+            APPLIED_IMMEDIATE => MidiTiming::Immediate,
+            _ => return None,
+        };
+        let frames = usize::try_from(self.block.load(Ordering::Relaxed)).ok()?;
+        let block = timing::block_duration(frames, self.sample_rate);
+        Some(timing::timing_considered(self.timing, applied, block))
     }
 
     /// The frames per audio callback actually in use, once the stream has settled: waits up to
@@ -363,15 +420,33 @@ impl AudioOut {
     }
 }
 
+/// Values the audio callback publishes for the startup report.
+struct Report {
+    /// Frames per callback, once settled.
+    block: Arc<AtomicU32>,
+    /// [`APPLIED_EXACT`] or [`APPLIED_IMMEDIATE`], once settled.
+    applied: Arc<AtomicU8>,
+}
+
+const APPLIED_EXACT: u8 = 1;
+const APPLIED_IMMEDIATE: u8 = 2;
+
 /// State owned by the audio callback. Everything is allocated up front.
 struct Callback {
     processor: Processor,
-    inputs: Vec<Consumer<MidiEvent>>,
-    events: Vec<MidiEvent>,
+    inputs: Vec<Consumer<TimedEvent>>,
+    /// This callback's events as `(frame, event)`, sorted by frame.
+    events: Vec<(usize, MidiEvent)>,
+    /// The events of one part of a callback too big to process at once, relative to that part.
+    part_events: Vec<(usize, MidiEvent)>,
     left: Vec<f32>,
     right: Vec<f32>,
     channels: usize,
-    block: Arc<AtomicU32>,
+    rate: u32,
+    timing: MidiTiming,
+    /// When the previous callback ran: exact timing maps the time since then onto this block.
+    prev: Option<Instant>,
+    report: Report,
     callbacks: u32,
 }
 
@@ -380,45 +455,80 @@ struct Callback {
 const SETTLE_CALLBACKS: u32 = 4;
 
 impl Callback {
-    fn new(processor: Processor, inputs: Vec<Consumer<MidiEvent>>, channels: usize, block: Arc<AtomicU32>) -> Self {
+    fn new(
+        processor: Processor,
+        inputs: Vec<Consumer<TimedEvent>>,
+        channels: usize,
+        rate: u32,
+        timing: MidiTiming,
+        report: Report,
+    ) -> Self {
         Self {
             processor,
             inputs,
             events: Vec::with_capacity(QUEUE_CAP * 2),
-            left: vec![0.0; MAX_FRAMES],
-            right: vec![0.0; MAX_FRAMES],
+            part_events: Vec::with_capacity(QUEUE_CAP * 2),
+            left: vec![0.0; MAX_CALLBACK_FRAMES],
+            right: vec![0.0; MAX_CALLBACK_FRAMES],
             channels: channels.max(1),
-            block,
+            rate,
+            timing,
+            prev: None,
+            report,
             callbacks: 0,
         }
     }
 
     fn run(&mut self, out: &mut [f32]) {
+        let now = Instant::now();
+        let prev = self.prev.replace(now);
+        let ch = self.channels;
+        let frames = out.len().checked_div(ch).unwrap_or(0);
+        let mode = self.timing.resolve(frames, self.rate);
         if self.callbacks < SETTLE_CALLBACKS {
             self.callbacks = self.callbacks.saturating_add(1);
         } else {
-            let frames = out.len().checked_div(self.channels).unwrap_or(0);
-            self.block
+            self.report
+                .block
                 .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Relaxed);
+            let applied = if mode == MidiTiming::Exact {
+                APPLIED_EXACT
+            } else {
+                APPLIED_IMMEDIATE
+            };
+            self.report.applied.store(applied, Ordering::Relaxed);
         }
+
         self.events.clear();
         for q in &mut self.inputs {
             while self.events.len() < self.events.capacity() {
-                match q.pop() {
-                    Ok(ev) => self.events.push(ev),
-                    Err(_) => break,
-                }
+                let Ok(ev) = q.pop() else { break };
+                let at = match (mode, prev) {
+                    (MidiTiming::Exact, Some(p)) => timing::exact_offset(ev.at, p, now, frames),
+                    _ => 0,
+                };
+                self.events.push((at, ev.event));
             }
         }
-        let ch = self.channels;
-        let mut first = true;
-        for chunk in out.chunks_mut(MAX_FRAMES.saturating_mul(ch)) {
-            let frames = chunk.len().checked_div(ch).unwrap_or(0);
-            let (Some(l), Some(r)) = (self.left.get_mut(..frames), self.right.get_mut(..frames)) else {
+        timing::sort_by_frame(&mut self.events);
+
+        let mut start = 0usize;
+        for chunk in out.chunks_mut(MAX_CALLBACK_FRAMES.saturating_mul(ch)) {
+            let n = chunk.len().checked_div(ch).unwrap_or(0);
+            let end = start.saturating_add(n);
+            let (Some(l), Some(r)) = (self.left.get_mut(..n), self.right.get_mut(..n)) else {
                 continue;
             };
-            self.processor.process(if first { &self.events } else { &[] }, l, r);
-            first = false;
+            // This part's events, relative to it.
+            self.part_events.clear();
+            self.part_events.extend(
+                self.events
+                    .iter()
+                    .filter(|(at, _)| (start..end).contains(at))
+                    .map(|&(at, ev)| (at.saturating_sub(start), ev)),
+            );
+            self.processor.process(&self.part_events, l, r);
+            start = end;
             for ((frame, &lv), &rv) in chunk.chunks_mut(ch).zip(l.iter()).zip(r.iter()) {
                 match frame {
                     [mono] => *mono = f32::midpoint(lv, rv),
@@ -436,8 +546,8 @@ impl Callback {
 
 // ---- offline ---------------------------------------------------------------------------------
 
-/// Renders `frames` frames of `plugin` offline, applying each `(frame, event)` at the start of
-/// the block containing that frame. For checks without an audio device.
+/// Renders `frames` frames of `plugin` offline, applying each `(frame, event)` at its frame.
+/// For checks without an audio device.
 ///
 /// # Errors
 ///
@@ -455,10 +565,11 @@ pub fn render_offline(
     let mut pending = events.into_iter().peekable();
     let mut block_events = Vec::new();
     for (i, (l, r)) in left.chunks_mut(BLOCK).zip(right.chunks_mut(BLOCK)).enumerate() {
-        let end = i.saturating_add(1).saturating_mul(BLOCK);
+        let start = i.saturating_mul(BLOCK);
+        let end = start.saturating_add(BLOCK);
         block_events.clear();
-        while let Some((_, ev)) = pending.next_if(|(at, _)| *at < end) {
-            block_events.push(ev);
+        while let Some((at, ev)) = pending.next_if(|(at, _)| *at < end) {
+            block_events.push((at.saturating_sub(start), ev));
         }
         p.process(&block_events, l, r);
     }
@@ -473,6 +584,15 @@ mod tests {
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(ToString::to_string).collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn jack_hint_names_pw_jack_only_when_installed() {
+        assert!(jack_missing_why(true).contains("start with `pw-jack "));
+        assert!(!jack_missing_why(false).contains("pw-jack "));
+        assert!(in_path("sh"));
+        assert!(!in_path("onezan-no-such-program"));
     }
 
     #[test]
