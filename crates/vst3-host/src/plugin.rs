@@ -5,7 +5,8 @@ use crate::events::{EventList, ParamChanges};
 use crate::host::HostApp;
 use crate::midi::MidiEvent;
 use crate::module::{Module, RawClass};
-use crate::util::{hex, int32, ok, tuid_bytes, venum};
+use crate::stream::MemoryStream;
+use crate::util::{class_id_string, int32, ok, tuid_bytes, venum};
 use crate::{Error, Result};
 use std::path::Path;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use vst3::Steinberg::Vst::{
     IParameterChanges, MediaTypes_, NoteOffEvent, NoteOnEvent, PolyPressureEvent, ProcessContext, ProcessContext_,
     ProcessData, ProcessModes_, ProcessSetup, SpeakerArr, SpeakerArrangement, SymbolicSampleSizes_,
 };
-use vst3::Steinberg::{FUnknown, IPluginBaseTrait, TUID};
+use vst3::Steinberg::{FUnknown, IBStream, IPluginBaseTrait, TUID};
 use vst3::{ComPtr, ComWrapper};
 
 /// VST3's pseudo controller numbers for MIDI messages that are not CCs (`ControllerNumbers`).
@@ -27,6 +28,8 @@ const MAP_CTRLS: usize = 130;
 /// A loaded plugin instance (main thread).
 pub struct Plugin {
     name: String,
+    /// The class id in hex: names this plugin across versions and installs.
+    class_id: String,
     component: ComPtr<IComponent>,
     processor: ComPtr<IAudioProcessor>,
     controller: Option<ComPtr<IEditController>>,
@@ -52,7 +55,11 @@ fn pick_class<'a>(classes: &'a [RawClass], class_id: Option<&str>) -> Option<&'a
                 .find(|c| c.sub_categories.split('|').any(|s| s == "Instrument"))
                 .or_else(|| audio().next())
         },
-        |id| classes.iter().find(|c| hex(&c.cid).eq_ignore_ascii_case(id)),
+        |id| {
+            classes
+                .iter()
+                .find(|c| class_id_string(&c.cid).eq_ignore_ascii_case(id))
+        },
     )
 }
 
@@ -71,6 +78,7 @@ impl Plugin {
             Error::Instantiate(bundle.display().to_string(), "no matching audio processor class".into())
         })?;
         let name = class.name.clone();
+        let class_id = class_id_string(&class.cid);
         let err = |m: &str| Error::Instantiate(name.clone(), m.to_string());
 
         let host = ComWrapper::new(HostApp);
@@ -94,6 +102,7 @@ impl Plugin {
 
         let mut plugin = Self {
             name: name.clone(),
+            class_id,
             component,
             processor,
             controller: None,
@@ -143,12 +152,94 @@ impl Plugin {
                 unsafe { c.setComponentHandler(h.as_ptr()) };
             }
         }
+        // The controller starts in step with the component (its parameters show the sound).
+        if let Ok(state) = plugin.component_state() {
+            plugin.set_component_state_on_controller(state);
+        }
         Ok(plugin)
     }
 
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The class id in hex, to file things by this plugin under (its saved state).
+    #[must_use]
+    pub fn class_id(&self) -> &str {
+        &self.class_id
+    }
+
+    /// The plugin's current state: its sound and settings, as the plugin itself writes them.
+    /// Main thread; fine while audio runs.
+    ///
+    /// # Errors
+    ///
+    /// When the component cannot write its state.
+    pub fn state(&self) -> Result<State> {
+        let component = self.component_state()?;
+        let controller = self
+            .controller
+            .as_ref()
+            .and_then(|c| {
+                let stream = ComWrapper::new(MemoryStream::default());
+                // SAFETY: valid controller; the stream lives through the call.
+                ok(unsafe { c.getState(stream_ptr(&stream)) }).then(|| stream.bytes())
+            })
+            .unwrap_or_default();
+        Ok(State { component, controller })
+    }
+
+    /// Restores a state from [`Self::state`], in the order the VST3 SDK's hosts use: the
+    /// component, then the component's state to the controller, then the controller's own.
+    /// Main thread; call it before [`Self::start`].
+    ///
+    /// # Errors
+    ///
+    /// When the component refuses the state (another version, or not its own).
+    pub fn set_state(&mut self, state: &State) -> Result<()> {
+        let stream = ComWrapper::new(MemoryStream::from_bytes(state.component.clone()));
+        // SAFETY: valid component; the stream lives through the call.
+        if !ok(unsafe { self.component.setState(stream_ptr(&stream)) }) {
+            return Err(Error::Instantiate(
+                self.name.clone(),
+                "the plugin refused the saved state".into(),
+            ));
+        }
+        self.set_component_state_on_controller(state.component.clone());
+        if let Some(c) = &self.controller
+            && !state.controller.is_empty()
+        {
+            let stream = ComWrapper::new(MemoryStream::from_bytes(state.controller.clone()));
+            // SAFETY: valid controller; the stream lives through the call.
+            if !ok(unsafe { c.setState(stream_ptr(&stream)) }) {
+                log::warn!("vst3 {}: the controller refused its saved state", self.name);
+            }
+        }
+        Ok(())
+    }
+
+    fn component_state(&self) -> Result<Vec<u8>> {
+        let stream = ComWrapper::new(MemoryStream::default());
+        // SAFETY: valid component; the stream lives through the call.
+        if ok(unsafe { self.component.getState(stream_ptr(&stream)) }) {
+            Ok(stream.bytes())
+        } else {
+            Err(Error::Instantiate(
+                self.name.clone(),
+                "the plugin cannot save its state".into(),
+            ))
+        }
+    }
+
+    fn set_component_state_on_controller(&self, component: Vec<u8>) {
+        if let Some(c) = &self.controller {
+            let stream = ComWrapper::new(MemoryStream::from_bytes(component));
+            // SAFETY: valid controller; the stream lives through the call.
+            if !ok(unsafe { c.setComponentState(stream_ptr(&stream)) }) {
+                log::info!("vst3 {}: the controller did not take the component's state", self.name);
+            }
+        }
     }
 
     /// The plugin's own editor, ready to be embedded in a window of the app. Main thread. Drop
@@ -369,6 +460,51 @@ impl Drop for Plugin {
         }
         // SAFETY: valid, inactive component, terminated exactly once.
         unsafe { self.component.terminate() };
+    }
+}
+
+/// The stream as the `IBStream*` the plugin takes.
+fn stream_ptr(s: &ComWrapper<MemoryStream>) -> *mut IBStream {
+    s.as_com_ref::<IBStream>().map_or(std::ptr::null_mut(), |r| r.as_ptr())
+}
+
+/// A plugin's saved state: what its component and its controller wrote, as opaque bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct State {
+    pub component: Vec<u8>,
+    pub controller: Vec<u8>,
+}
+
+impl State {
+    /// Marks the file format; the number changes if the layout ever does.
+    const MAGIC: &[u8; 8] = b"OZVST3S1";
+
+    /// The state as one byte string: the marker, then each part as a little-endian u64 length
+    /// and its bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Self::MAGIC.to_vec();
+        for part in [&self.component, &self.controller] {
+            out.extend_from_slice(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+            out.extend_from_slice(part);
+        }
+        out
+    }
+
+    /// Reads [`Self::to_bytes`]' output; `None` when it is not that (damaged or another format).
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut rest = bytes.strip_prefix(Self::MAGIC.as_slice())?;
+        let mut part = || -> Option<Vec<u8>> {
+            let (len, tail) = rest.split_first_chunk::<8>()?;
+            let len = usize::try_from(u64::from_le_bytes(*len)).ok()?;
+            let (data, tail) = tail.split_at_checked(len)?;
+            rest = tail;
+            Some(data.to_vec())
+        };
+        let component = part()?;
+        let controller = part()?;
+        rest.is_empty().then_some(Self { component, controller })
     }
 }
 
@@ -610,5 +746,24 @@ fn copy_or_silence(dst: &mut [f32], src: Option<&Vec<f32>>) {
     dst.fill(0.0);
     for (d, s) in dst.iter_mut().zip(src.into_iter().flatten()) {
         *d = *s;
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::State;
+
+    #[test]
+    fn state_bytes_round_trip_and_reject_damage() {
+        let s = State {
+            component: b"sound".to_vec(),
+            controller: vec![0, 1, 2],
+        };
+        let bytes = s.to_bytes();
+        assert_eq!(State::from_bytes(&bytes), Some(s));
+        assert_eq!(State::from_bytes(&bytes[..bytes.len() - 1]), None);
+        assert_eq!(State::from_bytes(b"something else"), None);
+        let empty = State::default();
+        assert_eq!(State::from_bytes(&empty.to_bytes()), Some(empty));
     }
 }

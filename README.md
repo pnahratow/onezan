@@ -29,6 +29,10 @@ build/linux-release.sh      # -> target/linux-release/release/onezan
 It needs only Podman on the build machine, and only glibc and ALSA (`libasound.so.2`) on the
 machine it runs on; graphics and JACK are loaded at runtime.
 
+On Linux, the Windows build can be checked with Wine (`wine` and the MinGW cross-compiler, e.g.
+Arch's `mingw-w64-gcc`): `cargo test --target x86_64-pc-windows-gnu --workspace` builds the tests
+for Windows and runs them under Wine.
+
 ## Use
 
 ```sh
@@ -49,6 +53,25 @@ On Debian, Ubuntu and Mint, PipeWire's JACK library is not on the library path: 
 latency, install `pipewire-jack` and start with `pw-jack onezan` (the app says so when it
 applies).
 
+## Where the fingerings come from
+
+onezan shows the standard fingering taught for each scale, for both hands, in all 12 keys:
+major, natural minor, harmonic minor and melodic minor. It doesn't invent fingerings. Every scale
+was compared with at least two independent published charts:
+[pianoscales.org](https://pianoscales.org/major.html),
+[Hoffman Academy's Melodic Minor Scale Fingering Guide](https://cdn.hoffmanacademy.com/blog/wp-content/uploads/2022/04/Melodic-Minor-Scale-Fingering-Guide.pdf),
+[Greg Spero's scale lessons](https://composition.gregspero.com/lessons/a3/),
+[musicandhealth.co.uk](https://musicandhealth.co.uk/scales_examples/fingering1.htm), and a
+[teaching chart from the University of Miami](https://www.cs.miami.edu/home/burt/music/finger-charts.html)
+that shows where the fourth finger falls in every key. The sources agree on almost every note.
+Where they differ, it's only about which finger starts or ends a scale in a few keys. In those
+cases onezan follows the majority, and the code records each case and the reason. The numbers
+from these charts are built into onezan's automated tests, so the tests fail if the fingerings
+ever change by accident. The tests also check that every scale can be played up and down over
+one to four octaves: the thumb only lands on white keys, and the hand only moves by passing the
+thumb under or crossing over it. Many good fingerings exist, and teachers and exam boards
+sometimes prefer others. If your teacher gives you a different one, follow your teacher.
+
 ## Layout
 
 | Crate | Role |
@@ -59,8 +82,7 @@ applies).
 
 ## Not done yet
 
-- The plugin's editor in the window (X11 on Linux, HWND on Windows), plugin state saving,
-  presets.
+- The plugin's editor on Windows (HWND), presets.
 - CLAP hosting (`clack-host`), a built-in fallback sound.
 - macOS module loading.
 

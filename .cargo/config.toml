@@ -1,0 +1,11 @@
+# `cargo test --target x86_64-pc-windows-gnu` builds the Windows test binaries (with the MinGW
+# cross-compiler, `x86_64-w64-mingw32-gcc`) and runs them under Wine. Checks Windows logic (paths,
+# settings, SQLite, file handling); not audio, MIDI or plugins, which need real Windows.
+[target.x86_64-pc-windows-gnu]
+runner = "wine"
+
+[env]
+# Wine's prefix (its fake C: drive and registry) inside target/, not in ~/.wine.
+WINEPREFIX = { value = "target/wine-prefix", relative = true }
+# Wine's own debug messages drown the test output.
+WINEDEBUG = "-all"

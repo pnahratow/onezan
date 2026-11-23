@@ -10,14 +10,17 @@ use std::time::Duration;
 mod embed;
 mod fingering;
 mod gui;
+mod instrument_state;
 mod keyboard;
 mod plugins;
+mod progress;
 mod report;
 mod session;
+mod settings;
 
 use plugins::{installed, load};
 use report::{midi_change, print_report, print_section};
-use session::{Options, Session};
+use session::{Options, Remembered, Session};
 
 #[derive(Parser)]
 #[command(version, about = "Play your MIDI keyboard through a VST3 instrument")]
@@ -103,6 +106,7 @@ fn main() -> Result<()> {
             midi: None,
             timing: MidiTiming::Auto,
             metronome: None,
+            remembered: Remembered::default(),
         }),
         Some(Cmd::Gui {
             plugin,
@@ -114,6 +118,7 @@ fn main() -> Result<()> {
             midi,
             timing: midi_timing.into(),
             metronome,
+            remembered: Remembered::default(),
         }),
         Some(Cmd::List { all }) => {
             list(all);
@@ -141,6 +146,7 @@ fn main() -> Result<()> {
                 midi,
                 timing: midi_timing.into(),
                 metronome,
+                remembered: Remembered::default(),
             },
             demo,
         ),

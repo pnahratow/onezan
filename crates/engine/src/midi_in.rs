@@ -89,7 +89,11 @@ pub struct Keys {
     velocity: [AtomicU8; 128],
     sustain: AtomicBool,
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// Told of every note: (key, velocity), velocity 0 for a release.
+    listener: OnceLock<NoteListener>,
 }
+
+type NoteListener = Box<dyn Fn(u8, u8) + Send + Sync>;
 
 impl Default for Keys {
     fn default() -> Self {
@@ -97,6 +101,7 @@ impl Default for Keys {
             velocity: std::array::from_fn(|_| AtomicU8::new(0)),
             sustain: AtomicBool::new(false),
             waker: OnceLock::new(),
+            listener: OnceLock::new(),
         }
     }
 }
@@ -127,6 +132,18 @@ impl Keys {
         let _ = self.waker.set(Box::new(waker));
     }
 
+    /// Sets what is told of every note played, on the MIDI thread: (key, velocity), velocity 0
+    /// for a release (for example, to record practice). Only the first call counts.
+    pub fn set_note_listener(&self, listener: impl Fn(u8, u8) + Send + Sync + 'static) {
+        let _ = self.listener.set(Box::new(listener));
+    }
+
+    fn tell(&self, key: u8, velocity: u8) {
+        if let Some(l) = self.listener.get() {
+            l(key, velocity);
+        }
+    }
+
     fn update(&self, ev: MidiEvent) {
         let set = |key: u8, v: u8| {
             if let Some(slot) = self.velocity.get(usize::from(key)) {
@@ -134,8 +151,14 @@ impl Keys {
             }
         };
         match ev {
-            MidiEvent::NoteOn { key, velocity, .. } => set(key, velocity.max(1)),
-            MidiEvent::NoteOff { key, .. } => set(key, 0),
+            MidiEvent::NoteOn { key, velocity, .. } => {
+                set(key, velocity.max(1));
+                self.tell(key, velocity.max(1));
+            }
+            MidiEvent::NoteOff { key, .. } => {
+                set(key, 0);
+                self.tell(key, 0);
+            }
             MidiEvent::ControlChange {
                 controller: 64, value, ..
             } => self.sustain.store(value >= 64, Ordering::Relaxed),

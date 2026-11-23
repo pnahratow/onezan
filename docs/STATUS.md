@@ -82,7 +82,12 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         keyboard
   embed.rs              the X11 child window holding the plugin's editor; fitting it in
   keyboard.rs           the on-screen keyboard widget: scale tint, velocity meter, fingering badges
-  fingering.rs          fingering preview (only C major for now)
+  settings.rs           settings.json (config folder): tempo, click, scale, window size, the
+                        instrument and keyboard used last time; data/config folder paths
+  instrument_state.rs   the instrument's sound (plugin state) per plugin, saved on quit
+  progress.rs           practice history: every note with its scale, in SQLite; practice time
+  fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
+                        hands, any octaves; the preview the window shows
 build/                  Linux release build in a container (glibc 2.30+)
 README.md, LICENSE (GPL-3.0), .gitignore
 ```
@@ -112,23 +117,15 @@ Commit only when the user asks.
 - The octave button on a held note: set aside by the user for now.
 - Exact MIDI timing has only been checked offline and by the report; no system here gives short
   enough blocks to hear it (it is picked at 11 ms or less).
-- Anything running on Windows (it is only lint/type-checked).
+- Real Windows: so far only under Wine (tests, plugin loading and processing with Surge XT; see "Windows checks under Wine"). Audio devices, MIDI, latency and the editor (HWND stub) are unchecked.
 
 ## Next steps, in order
 
-1. **Save settings between starts** (the user's next pick). Today everything resets at each
-   start: the instrument's sound (patch) and its parameters, the tempo, the click's volume and
-   sound, the fingering preview. Plan:
-   - Plugin state: an IBStream MemoryStream; `getState`/`setState` on the component, then
-     `setComponentState` on the controller (and its own `getState`/`setState`). Save on quit,
-     restore after loading.
-   - App settings (chosen plugin, MIDI port if chosen by hand, tempo, click volume and sound,
-     fingering preview, window size) in a small config file in the platform's config folder
-     (`~/.config/onezan/` on Linux, `%APPDATA%` on Windows). The automatic choices stay the
-     default; a saved choice that no longer exists falls back to them.
-2. **Scale trainer basics**: the real fingering table for all scales (hand-written data, both
-   hands), a scale picker in place of the C major preview, the learning order from the planning
-   notes below.
+1. **Check by hand on the host**: settings, the instrument's sound and the practice history
+   (all checked here in the VM, see "Saved between starts"); the scales window with the mouse.
+2. **Scale trainer basics**: hands separately and contrary motion, choosing octaves, showing the way down
+   (melodic minor differs), the learning order (`fingering::LEARNING_ORDER`). The table is done
+   (see "Fingering table" below).
 3. **Windows**: embed the editor in an HWND child window (the stub in `embed.rs`), and run the
    app there for real (so far only lint/type-checked).
 4. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
@@ -137,13 +134,12 @@ Commit only when the user asks.
    stays the default). The options window is the natural place.
 6. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
    in the embedded editor; sharpness under fractional scaling (XWayland).
-7. Later: CLAP via `clack-host`, progress in SQLite (store raw note events).
+7. Later: CLAP via `clack-host`.
 
 ## Known gaps and shortcuts in the current code
 
 - Live MIDI is stamped with `Instant::now()` when midir's callback runs, not with the driver's
   timestamp (midir's is on another clock, and differs per platform). Good to well under 1 ms.
-- The controller is not synced with the component's state after loading (needs IBStream; step 5).
 - `restartComponent` and `performEdit` from the plugin are ignored.
 - Plugins run in our own process, so a plugin crash takes the app down.
 - macOS module loading is not implemented (not a target).
@@ -249,8 +245,10 @@ works on any GL driver (the VM has only llvmpipe).
   C keys are labelled with their octave (C4 = middle C).
 - Held keys come from the engine: `onezan_engine::Keys` (per key the velocity it was struck with
   while held, 0 when up; all channels merged; and the sustain pedal), written by the MIDI thread, which also wakes the window to repaint.
-- Fingering preview: only "C major, both hands" so far (`fingering.rs`), to show the badges. The
-  real scale table replaces it.
+- Fingering preview: the bar's "Scale" button opens the scales window (see "Saved between
+  starts"); the chosen scale is shown two
+  octaves hands together going up. The hands meet on the root nearest middle C (C major: left
+  C2 to C4, right C4 to C6); a scale reaching past the keys widens the keyboard while shown.
 - Checked in the VM with screenshots (`grim`), with notes sent through the Midi Through port
   (`onezan gui --midi through` plus `aseqsend -p 14:0 90 3C 64`).
 
@@ -304,7 +302,7 @@ about 0.2 s so it fits 300 BPM).
 
 - `Metronome` (shared, atomics): on/off, BPM (20 to 300), volume (0 to 1, linear; default 0.6),
   sound, and `play_sample()` (one click now, metronome on or off, to try a sound).
-- Window: in the status bar's right part, a "Metronome" switch and a BPM field (drag, scroll or
+- Window: in the status bar's right part, a metronome button (a drawn metronome icon, highlighted while it runs) and a BPM field (drag, scroll or
   type). Volume and sound are in the options window; changing either plays a sample click. Space starts and stops it. On purpose nothing more: the user wants no beats per bar,
   accents or beat LEDs (an earlier version had them).
 - `onezan play --metronome BPM` and `onezan gui --metronome BPM` start it at that tempo.
@@ -327,3 +325,96 @@ unwrap/expect/panic/indexing in tests. `cargo clippy --all-targets` is clean on 
 - Also clean on Windows: `cargo clippy --target x86_64-pc-windows-gnu --all-targets` (checked
   only; nothing has run on Windows).
 - `rustfmt.toml` sets `max_width = 120`; the code is formatted with it.
+
+## Fingering table (2026-11-23)
+
+`apps/onezan/src/fingering.rs`. Major, natural, harmonic and melodic minor in all twelve keys,
+both hands, for any number of octaves, the traditional fingering. Each hand is stored as one
+finger per scale degree plus the fingers that differ at the ends (the left hand's 5 on the bottom
+root, the right hand's 5 on the top one, a different start finger). Melodic minor comes down as
+natural minor, with its fingering.
+
+Cross-checked against five sources; the tests hold their numbers verbatim and fail if the table
+drifts. Every place we differ from one is listed in the test with the reason:
+
+- pianoscales.org: major, natural and harmonic minor, one octave, all keys. All agree except
+  G# harmonic minor's right hand start (it says 2 3; we use 3 4 like the next three sources).
+- Hoffman Academy, Melodic Minor Scale Fingering Guide (PDF, two octaves, all keys). All agree
+  except two end fingers: F# left hand top note (2; we keep 4 like the one-octave charts) and
+  Bb right hand start (4; we use 2 like pianoscales.org and Greg Spero).
+- Greg Spero (composition.gregspero.com/lessons/a3): natural minor and the melodic minor
+  exceptions. All agree except C# melodic minor's right hand start (3 4; we use 2 3 like
+  Hoffman).
+- musicandhealth.co.uk: B, F# and C# major, two octaves. Agree except the left hand's top note
+  of F# and Db (2; we keep 4 and 3).
+- University of Miami chart (via cs.miami.edu/~burt): where the fourth finger falls in each key
+  and type. All agree.
+
+Settled by the sources against my first draft: G# harmonic minor's left hand is 3 2 1 4 3 2 1 3
+(thumb on F##), not natural minor's 3 2 1 3 2 1 4 3. Hoffman's blog says natural and harmonic
+minor share one fingering everywhere; three charts disagree for G#, so we follow them. Not
+checked against the ABRSM books (not online).
+
+A test also checks every scale, both directions, 1 to 4 octaves: the thumb only on white keys,
+and the fingers only move by passing the thumb under (right hand up) or crossing over it.
+
+## Saved between starts (2026-11-23)
+
+Everything is best effort: what is missing, damaged or no longer works gives way to the
+automatic choice or the default, and the app always starts. Checked in the VM with each case
+made on purpose; the startup report's plugin line says what happened.
+
+- **Settings** (`settings.rs`): `~/.config/onezan/settings.json` (`%APPDATA%\onezan` on Windows),
+  JSON by the user's choice (`serde_json`). Tempo, click volume and sound, the scale shown, window
+  size, the instrument (plugin class id) and MIDI keyboard (port name without its ALSA address)
+  used last time. Every key optional, unknown keys ignored; an unreadable file is moved to
+  `settings.json.broken`. Saved one second after a change (a drag saves once) and on quit,
+  written to a temporary file and renamed. `--metronome BPM` wins over the saved tempo; a plugin
+  or `--midi` given on the command line wins over the remembered ones. A saved window size turns
+  off fitting the window to the editor at the first frame. `play` (no window) uses no settings
+  except the instrument's sound.
+- **Fallbacks**: a remembered instrument that fails to load → the first instrument. A remembered
+  keyboard that is not plugged in → the automatic choice (not waited for). Audio output has no
+  choice yet, so nothing is saved for it.
+- **Instrument's sound** (`instrument_state.rs`, `Plugin::state`/`set_state`, `stream.rs`):
+  `~/.local/share/onezan/instruments/<class id>.state`, the component's and controller's state.
+  Saved on quit (window only), restored right after loading, in the SDK hosts' order (component,
+  `setComponentState`, controller). Loading also gives the controller the component's state now.
+  A damaged or refused file is moved aside (`.broken`, `.refused`); a marker file around the
+  restore makes the next start skip a state the plugin crashed on (`.crashed`). Test: Surge XT's
+  patch renamed in the saved bytes comes back after restoring (`crates/engine/tests/plugin.rs`).
+- **Practice history** (`progress.rs`): `~/.local/share/onezan/progress.sqlite` (`rusqlite`,
+  bundled SQLite), table `notes(t_ms, key, velocity, scale)`, every note press and release with
+  the scale selected then (NULL: none). Fed by `Keys::set_note_listener` on the MIDI thread; a
+  thread writes batches every 2 s, on a scale change and on quit (the quit waits for it). WAL, so
+  the window reads while it writes. Practice time = gaps between presses added up, gaps over 15 s
+  (`PAUSE`) left out; worked out when read, so it can change later. A damaged file is moved
+  aside and a new one started.
+- **Scales window**: the bar's "Scale: ..." button opens it (an OS window of its own, like the
+  options). All 48 scales with time spent and last played, ordered by learning order, most or
+  least practised; click to show one, "No scale" to clear. Re-reads the history every 3 s while
+  open.
+- **Buttons**: every button has a lighter fill and a visible border (brighter on hover, darker
+  pressed); toggles (Metronome, Scale, Options, the order) are real buttons that stay highlighted
+  while on (`toggle` in `gui.rs`), not egui's frameless `toggle_value`.
+
+## Windows checks under Wine (2026-11-23)
+
+`.cargo/config.toml` makes Wine the runner for `x86_64-pc-windows-gnu`, with its prefix in
+`target/wine-prefix` (not `~/.wine`). Needs `wine` and `mingw-w64-gcc` (Arch packages).
+
+    cargo test --target x86_64-pc-windows-gnu --workspace   # about a minute the first time
+
+All tests pass as Windows binaries. Linux-only ones are left out (the editor's run loop, the
+virtual MIDI port). Surge XT 1.3.4 for Windows is installed in the prefix (its official installer,
+run with `/VERYSILENT`), so the plugin tests run there for real: Windows module loading
+(`InitDll`, bundle layout), processing, the sustain pedal and restoring a saved state all pass.
+Without it in the prefix (a fresh `target/`), they skip.
+
+Found this way: on Windows the class id is kept in COM's GUID byte order, so the same plugin
+printed a different id than on Linux. Ids are now printed in the SDK's canonical order
+everywhere (`util::class_id_string`), as other hosts and `.vstpreset` files show them. A test checks the
+settings and data folders are `%APPDATA%\onezan` there. The app itself runs under Wine
+(`wine target/x86_64-pc-windows-gnu/debug/onezan.exe`): the window, the Windows plugin folders,
+no MIDI ports (Wine passes none through by default). Wine is not Windows: real audio, MIDI,
+latency and the editor still need a Windows VM or PC (see the next steps).

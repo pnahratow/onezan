@@ -2,8 +2,8 @@
 //!
 //! Built directly on the `vst3` crate's generated bindings. Only what a "play a keyboard through
 //! a plugin" app needs is implemented: one instrument, note/controller input, a stereo main output.
-//! The plugin's editor can be embedded in a window of the app ([`Editor`]). State saving comes
-//! later.
+//! The plugin's editor can be embedded in a window of the app ([`Editor`]), and its state (its
+//! sound) saved and restored ([`Plugin::state`], [`Plugin::set_state`]).
 //!
 //! Threading: [`Plugin`] lives on the main thread. [`Plugin::start`] hands out a [`Processor`],
 //! which is `Send` and is moved to the audio thread. Drop the processor (stop the audio stream)
@@ -18,11 +18,12 @@ mod plugin;
 #[cfg(target_os = "linux")]
 mod run_loop;
 mod scan;
+mod stream;
 mod util;
 
 pub use editor::Editor;
 pub use midi::MidiEvent;
-pub use plugin::{Plugin, Processor};
+pub use plugin::{Plugin, Processor, State};
 pub use scan::{PluginInfo, default_search_paths, find_bundles, scan};
 
 #[derive(Debug, thiserror::Error)]

@@ -16,6 +16,9 @@ egui.workspace = true
 raw-window-handle = "0.6"
 # The version eframe uses: we run its event loop ourselves.
 winit = { version = "0.30", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"

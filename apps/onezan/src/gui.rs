@@ -6,22 +6,33 @@
 //! window runs on X11 (XWayland under a Wayland desktop).
 
 use crate::embed::{Embedded, PixelRect};
-use crate::fingering::Preview;
+use crate::fingering::{Preview, Scale};
 use crate::keyboard::{self, KeyLook};
-use crate::session::{Options, Section, Session};
+use crate::progress::{Practice, Recorder};
+use crate::session::{Options, Remembered, Section, Session, port_name};
+use crate::settings::{MetronomeSettings, Settings, Store};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
 use onezan_engine::{Click, Keys, Metronome, MidiChange, Verdict};
 use onezan_vst3_host::Editor;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often the plugin's editor is serviced (its timers and X11 connection) while it is open.
 const EDITOR_IDLE: Duration = Duration::from_millis(4);
+
+/// How long settings stay unchanged before they are saved (a tempo drag saves once, at its end).
+const SAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// The window's size at the first start.
+const DEFAULT_SIZE: [f32; 2] = [1200.0, 760.0];
+const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 
 /// The embedded editor, shared by the window and the loop that services it (UI thread only).
 type Shared = Rc<RefCell<Option<Embedded>>>;
@@ -31,13 +42,22 @@ type Shared = Rc<RefCell<Option<Embedded>>>;
 /// # Errors
 ///
 /// When no window can be opened.
-pub fn run(opts: Options) -> Result<()> {
+pub fn run(mut opts: Options) -> Result<()> {
+    let (store, settings) = Store::open();
+    opts.remembered = Remembered {
+        plugin: settings.instrument.clone(),
+        midi: settings.midi.clone(),
+    };
+    let size = settings
+        .window
+        .filter(|s| s.iter().all(|v| v.is_finite()))
+        .map_or(DEFAULT_SIZE, |[w, h]| [w.max(MIN_SIZE[0]), h.max(MIN_SIZE[1])]);
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("onezan")
             .with_app_id("onezan")
-            .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 420.0]),
+            .with_inner_size(size)
+            .with_min_inner_size(MIN_SIZE),
         ..Default::default()
     };
     let mut event_loop = {
@@ -55,7 +75,7 @@ pub fn run(opts: Options) -> Result<()> {
     let mut app = eframe::create_native(
         "onezan",
         native,
-        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, &opts, shared)))),
+        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, &opts, shared, store, settings)))),
         &event_loop,
     );
     // Our own loop rather than eframe's: while the plugin's editor is open it is serviced every
@@ -87,7 +107,7 @@ struct App {
     embedded: Shared,
     /// Why the middle shows no editor.
     editor_note: Option<String>,
-    /// The window was sized to the editor once.
+    /// The window was sized to the editor once (or has a saved size, which wins).
     sized: bool,
     session: Option<Session>,
     /// Why there is no session.
@@ -98,8 +118,27 @@ struct App {
     preview: Preview,
     /// The options window is open.
     options_open: bool,
+    /// The scales window is open.
+    scales_open: bool,
+    scale_order: ScaleOrder,
+    /// Records the notes played (`None`: no practice history this run).
+    recorder: Option<Recorder>,
+    /// The scale the recorder was last told about.
+    recorded_scale: Option<String>,
+    progress_path: Option<PathBuf>,
+    /// Practice per scale, as last read for the scales window, and when.
+    practice: HashMap<String, Practice>,
+    practice_read: Option<Instant>,
     /// Its size at the last frame: a desktop that resizes it gets it repainted.
     options_size: Option<egui::Rect>,
+    store: Store,
+    /// The settings as read at the start: what cannot be read back now (the metronome without
+    /// audio, the keyboard while unplugged) keeps its saved value.
+    saved: Settings,
+    /// The main window's inner size at the last frame, in points.
+    window_size: Option<[f32; 2]>,
+    /// When the settings first differed from the saved ones.
+    changed_at: Option<Instant>,
 }
 
 fn midi_state(c: &MidiChange) -> MidiState {
@@ -111,8 +150,14 @@ fn midi_state(c: &MidiChange) -> MidiState {
 }
 
 impl App {
-    fn new(ctx: &egui::Context, opts: &Options, embedded: Shared) -> Self {
+    fn new(ctx: &egui::Context, opts: &Options, embedded: Shared, store: Store, settings: Settings) -> Self {
+        style_buttons(ctx);
         let keys = Arc::new(Keys::default());
+        let progress_path = crate::progress::default_path();
+        let recorder = progress_path.as_deref().and_then(Recorder::start);
+        if let Some(r) = &recorder {
+            keys.set_note_listener(r.note_sink());
+        }
         let repaint = ctx.clone();
         keys.set_waker(move || repaint.request_repaint());
         let midi = Arc::new(Mutex::new(MidiState::Waiting));
@@ -144,25 +189,92 @@ impl App {
             Some(Err(e)) => (None, Some(e.to_string())),
             None => (None, None),
         };
+        if let Some(m) = session.as_ref().map(Session::metronome) {
+            apply_metronome(m, &settings.metronome, opts.metronome.is_none());
+        }
         Self {
             editor,
             embedded,
             editor_note,
-            sized: false,
+            sized: settings.window.is_some(),
             session,
             error,
             keys,
             midi,
             range: keyboard::DEFAULT_RANGE,
-            preview: Preview::default(),
+            preview: settings
+                .scale
+                .as_deref()
+                .and_then(Preview::from_name)
+                .unwrap_or_default(),
             options_open: false,
+            scales_open: false,
+            scale_order: ScaleOrder::Learning,
+            recorder,
+            recorded_scale: None,
+            progress_path,
+            practice: HashMap::new(),
+            practice_read: None,
             options_size: None,
+            store,
+            window_size: settings.window,
+            saved: settings,
+            changed_at: None,
+        }
+    }
+
+    /// The settings as they are now.
+    fn settings(&self) -> Settings {
+        let metronome = self.session.as_ref().map_or_else(
+            || self.saved.metronome.clone(),
+            |s| {
+                let m = s.metronome();
+                MetronomeSettings {
+                    bpm: Some(m.bpm()),
+                    volume: Some(m.volume()),
+                    sound: Some(m.click().name().to_owned()),
+                }
+            },
+        );
+        let midi = match &*self.midi.lock().unwrap_or_else(PoisonError::into_inner) {
+            MidiState::Connected(p) => Some(port_name(p).to_owned()),
+            _ => self.saved.midi.clone(),
+        };
+        Settings {
+            metronome,
+            scale: (self.preview != Preview::Off).then(|| self.preview.name()),
+            window: self.window_size,
+            instrument: self.session.as_ref().map_or_else(
+                || self.saved.instrument.clone(),
+                |s| Some(s.plugin().class_id().to_owned()),
+            ),
+            midi,
+        }
+    }
+
+    /// Saves the settings once they have stayed the same for [`SAVE_DELAY`].
+    fn keep_settings(&mut self, ctx: &egui::Context) {
+        if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
+            self.window_size = Some([r.width().round(), r.height().round()]);
+        }
+        let now = self.settings();
+        if !self.store.changed(&now) {
+            self.changed_at = None;
+            return;
+        }
+        let since = *self.changed_at.get_or_insert_with(Instant::now);
+        let waited = since.elapsed();
+        if waited >= SAVE_DELAY {
+            self.store.save(&now);
+            self.changed_at = None;
+        } else {
+            ctx.request_repaint_after(SAVE_DELAY.saturating_sub(waited));
         }
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
-        let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, &mut self.preview);
-        let options = &mut self.options_open;
+        let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, self.preview);
+        let (options, scales) = (&mut self.options_open, &mut self.scales_open);
         let metronome = session.map(|s| Arc::clone(s.metronome()));
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
         egui::Sides::new().shrink_left().truncate().show(
@@ -194,18 +306,10 @@ impl App {
                 }
             },
             |ui| {
-                ui.toggle_value(options, "Options")
-                    .on_hover_text("Click sound and volume, in a window of its own");
+                toggle(ui, options, "Options").on_hover_text("Click sound and volume, in a window of its own");
                 ui.separator();
-                egui::ComboBox::from_id_salt("scale")
-                    .selected_text(format!("Fingering: {}", preview.name()))
-                    .show_ui(ui, |ui| {
-                        for p in Preview::ALL {
-                            ui.selectable_value(preview, p, p.name());
-                        }
-                    })
-                    .response
-                    .on_hover_text("Which scale fingering the keyboard shows");
+                toggle(ui, scales, format!("Scale: {}", preview.name()))
+                    .on_hover_text("Choose the scale whose fingering the keyboard shows, in a window of its own");
                 if let Some(m) = &metronome {
                     ui.separator();
                     metronome_controls(ui, m);
@@ -245,6 +349,67 @@ impl App {
         if close {
             self.options_open = false;
             self.options_size = None;
+        }
+    }
+
+    /// The scales, in a window of their own: pick one, see the time spent on each, in the
+    /// learning order or by time spent.
+    fn scales_window(&mut self, ctx: &egui::Context) {
+        // The practice figures are read again every few seconds while the window is open.
+        if self.practice_read.is_none_or(|t| t.elapsed() >= PRACTICE_REFRESH)
+            && let Some(path) = &self.progress_path
+        {
+            self.practice = crate::progress::practice(path);
+            self.practice_read = Some(Instant::now());
+        }
+        ctx.request_repaint_after(PRACTICE_REFRESH);
+        let builder = egui::ViewportBuilder::default()
+            .with_title("onezan scales")
+            .with_app_id("onezan")
+            .with_inner_size([460.0, 640.0]);
+        let (preview, order, practice) = (&mut self.preview, &mut self.scale_order, &self.practice);
+        let history = self.recorder.is_some();
+        let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("scales"), builder, |ui, _| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Order");
+                    for o in ScaleOrder::ALL {
+                        if ui.add(egui::Button::new(o.name()).selected(*order == o)).clicked() {
+                            *order = o;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(*preview != Preview::Off, egui::Button::new("No scale"))
+                        .clicked()
+                    {
+                        *preview = Preview::Off;
+                    }
+                    if !history {
+                        ui.label(RichText::new("Practice history is off (see the log)").weak());
+                    }
+                });
+                ui.separator();
+                scale_list(ui, preview, *order, practice);
+            });
+            ui.ctx().input(|i| i.viewport().close_requested())
+        });
+        if close {
+            self.scales_open = false;
+            self.practice_read = None;
+        }
+    }
+
+    /// Tells the recorder when the scale changes.
+    fn record_scale(&mut self) {
+        let now = (self.preview != Preview::Off).then(|| self.preview.name());
+        if now != self.recorded_scale {
+            if let Some(r) = &self.recorder {
+                r.set_scale(now.clone());
+            }
+            self.recorded_scale = now;
         }
     }
 
@@ -304,12 +469,15 @@ impl App {
                 self.range = keyboard::widen(&self.range, key);
             }
         }
-        let (keys, preview) = (&self.keys, self.preview);
-        keyboard::show(ui, self.range.clone(), |key| {
-            let (left, right) = preview.fingers(key);
+        // The fingering shown widens it too, but only while it is shown.
+        let shown = self.preview.shown();
+        let range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
+        let keys = &self.keys;
+        keyboard::show(ui, range, |key| {
+            let (left, right) = shown.fingers(key);
             KeyLook {
                 velocity: keys.velocity(key),
-                in_scale: preview.in_scale(key),
+                in_scale: shown.in_scale(key),
                 left,
                 right,
             }
@@ -319,6 +487,24 @@ impl App {
 
 /// The metronome's controls, right to left (the bar's right side is laid out that way): the
 /// tempo, then the switch. Its sound and volume are in the options window.
+/// Sets the metronome from saved settings; the tempo only when `tempo` (not given on the
+/// command line). A sound that no longer exists keeps the default.
+fn apply_metronome(m: &Metronome, s: &MetronomeSettings, tempo: bool) {
+    if let Some(bpm) = s.bpm.filter(|_| tempo) {
+        m.set_bpm(bpm);
+    }
+    if let Some(v) = s.volume {
+        m.set_volume(v);
+    }
+    if let Some(c) = s
+        .sound
+        .as_deref()
+        .and_then(|n| Click::ALL.into_iter().find(|c| c.name() == n))
+    {
+        m.set_click(c);
+    }
+}
+
 fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
     let mut bpm = m.bpm();
     let r = ui
@@ -327,14 +513,31 @@ fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
     if r.changed() {
         m.set_bpm(bpm);
     }
-    let mut on = m.is_on();
-    if ui
-        .toggle_value(&mut on, "Metronome")
-        .on_hover_text("Start or stop the metronome (Space)")
-        .clicked()
-    {
-        m.set_on(on);
+    let on = m.is_on();
+    let r = ui
+        .add(egui::Button::new("").selected(on).min_size(egui::vec2(34.0, 24.0)))
+        .on_hover_text("Metronome: start or stop (Space)");
+    let colour = ui.style().interact_selectable(&r, on).fg_stroke.color;
+    metronome_icon(ui.painter(), r.rect, colour);
+    if r.clicked() {
+        m.set_on(!on);
     }
+}
+
+/// A metronome drawn in `rect`: a tapering body with a pendulum leaning right and its weight.
+fn metronome_icon(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let s = rect.height().min(rect.width()) * 0.72;
+    let c = rect.center();
+    let at = |x: f32, y: f32| egui::pos2(x.mul_add(s, c.x), y.mul_add(s, c.y));
+    let stroke = egui::Stroke::new((s * 0.09).max(1.2), colour);
+    // The body, wide at the bottom; its base slightly below the centre line.
+    let body = vec![at(-0.34, 0.45), at(-0.14, -0.45), at(0.14, -0.45), at(0.34, 0.45)];
+    painter.add(egui::Shape::closed_line(body, stroke));
+    // The pendulum from its pivot near the base, leaning right, with the sliding weight.
+    let pivot = at(0.0, 0.3);
+    let tip = at(0.3, -0.5);
+    painter.line_segment([pivot, tip], stroke);
+    painter.circle_filled(pivot.lerp(tip, 0.55), s * 0.09, colour);
 }
 
 /// The metronome's sound and volume. Changing either plays a sample click.
@@ -370,6 +573,136 @@ fn metronome_options(ui: &mut egui::Ui, m: &Metronome) {
             });
             ui.end_row();
         });
+}
+
+/// A button that stays pressed while `on` (egui's `toggle_value` has no frame until hovered,
+/// so it does not look like a button).
+fn toggle(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let r = ui.add(egui::Button::new(text).selected(*on));
+    if r.clicked() {
+        *on = !*on;
+    }
+    r
+}
+
+/// How often the scales window reads the practice history again.
+const PRACTICE_REFRESH: Duration = Duration::from_secs(3);
+
+/// How the scales window lists the scales.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScaleOrder {
+    /// By type, then C, G, D, A, E, B, F, Db, Gb, Bb, Eb, Ab.
+    Learning,
+    /// Most time spent first.
+    Most,
+    /// Least time spent first: what needs practice.
+    Least,
+}
+
+impl ScaleOrder {
+    const ALL: [Self; 3] = [Self::Learning, Self::Most, Self::Least];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Learning => "Learning order",
+            Self::Most => "Most practised",
+            Self::Least => "Least practised",
+        }
+    }
+}
+
+/// The scales in `order`, as a table: name, time spent, last played. Clicking one shows it.
+fn scale_list(ui: &mut egui::Ui, preview: &mut Preview, order: ScaleOrder, practice: &HashMap<String, Practice>) {
+    let mut scales: Vec<(Scale, String, Practice)> = Scale::all()
+        .map(|s| {
+            let name = s.name();
+            let p = practice.get(&name).copied().unwrap_or_default();
+            (s, name, p)
+        })
+        .collect();
+    // A stable sort: equal times keep the learning order.
+    match order {
+        ScaleOrder::Learning => {}
+        ScaleOrder::Most => scales.sort_by_key(|(_, _, p)| std::cmp::Reverse(p.time)),
+        ScaleOrder::Least => scales.sort_by_key(|(_, _, p)| p.time),
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok());
+    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        egui::Grid::new("scales")
+            .num_columns(3)
+            .striped(true)
+            .spacing([18.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Scale").strong());
+                ui.label(RichText::new("Time spent").strong());
+                ui.label(RichText::new("Last played").strong());
+                ui.end_row();
+                for (scale, name, p) in scales {
+                    let selected = *preview == Preview::Scale(scale);
+                    if ui.selectable_label(selected, &name).clicked() {
+                        *preview = Preview::Scale(scale);
+                    }
+                    ui.label(spent(p.time));
+                    ui.label(
+                        p.last_ms
+                            .zip(now)
+                            .map_or_else(|| "–".to_owned(), |(t, n)| ago(n.saturating_sub(t))),
+                    );
+                    ui.end_row();
+                }
+            });
+    });
+}
+
+/// "45 s", "12 min", "1 h 05 min"; "–" for none.
+fn spent(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0 => "–".to_owned(),
+        1..60 => format!("{s} s"),
+        60..3600 => format!("{} min", s / 60),
+        _ => format!("{} h {:02} min", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// How long ago, from milliseconds: "just now", "5 min ago", "3 h ago", "2 days ago".
+fn ago(ms: i64) -> String {
+    let min = ms / 60_000;
+    match min {
+        ..1 => "just now".to_owned(),
+        1..60 => format!("{min} min ago"),
+        60..1440 => format!("{} h ago", min / 60),
+        1440..2880 => "yesterday".to_owned(),
+        _ => format!("{} days ago", min / 1440),
+    }
+}
+
+/// Buttons that look like buttons: a fill lighter than the panel, a visible border, a brighter
+/// hover and a darker press.
+fn style_buttons(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        style.spacing.button_padding = egui::vec2(10.0, 4.0);
+        let dark = style.visuals.dark_mode;
+        let w = &mut style.visuals.widgets;
+        let gray = Color32::from_gray;
+        let (fill, edge, hover_fill, hover_edge, press_fill) = if dark {
+            (gray(64), gray(112), gray(80), gray(150), gray(46))
+        } else {
+            (gray(232), gray(150), gray(244), gray(110), gray(212))
+        };
+        w.inactive.weak_bg_fill = fill;
+        w.inactive.bg_stroke = egui::Stroke::new(1.0, edge);
+        w.hovered.weak_bg_fill = hover_fill;
+        w.hovered.bg_stroke = egui::Stroke::new(1.0, hover_edge);
+        w.active.weak_bg_fill = press_fill;
+        w.active.bg_stroke = egui::Stroke::new(1.0, hover_edge);
+        for v in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+            v.corner_radius = egui::CornerRadius::same(4);
+        }
+    });
 }
 
 /// How many characters of a device or plugin name the bar shows.
@@ -435,6 +768,7 @@ impl eframe::App for App {
             m.set_on(!m.is_on());
             ctx.request_repaint();
         }
+        self.keep_settings(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             // The editor goes while its window is still there.
             drop(self.embedded.borrow_mut().take());
@@ -450,6 +784,10 @@ impl eframe::App for App {
         if self.options_open {
             self.options_window(ui.ctx());
         }
+        if self.scales_open {
+            self.scales_window(ui.ctx());
+        }
+        self.record_scale();
         // Bottom panels stack upwards: the keyboard at the very bottom, the bar above it.
         egui::Panel::bottom("keyboard")
             .exact_size(200.0)
@@ -464,12 +802,17 @@ impl eframe::App for App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        let settings = self.settings();
+        self.store.save(&settings);
         // The editor is removed before its window and its plugin go.
         drop(self.embedded.borrow_mut().take());
         drop(self.editor.take());
         if let Some(s) = self.session.take() {
+            s.save_sound();
             s.stop();
         }
+        // Writes the last notes.
+        drop(self.recorder.take());
     }
 }
 
@@ -506,6 +849,19 @@ fn to_u16(n: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn times_read_naturally() {
+        assert_eq!(spent(Duration::ZERO), "–");
+        assert_eq!(spent(Duration::from_secs(45)), "45 s");
+        assert_eq!(spent(Duration::from_secs(12 * 60 + 30)), "12 min");
+        assert_eq!(spent(Duration::from_mins(65)), "1 h 05 min");
+        assert_eq!(ago(20_000), "just now");
+        assert_eq!(ago(5 * 60_000), "5 min ago");
+        assert_eq!(ago(3 * 3_600_000), "3 h ago");
+        assert_eq!(ago(30 * 3_600_000), "yesterday");
+        assert_eq!(ago(3 * 86_400_000), "3 days ago");
+    }
 
     #[test]
     fn long_names_are_cut_with_an_ellipsis() {

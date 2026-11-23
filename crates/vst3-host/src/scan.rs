@@ -90,7 +90,7 @@ pub fn scan(bundles: &[PathBuf]) -> Vec<PluginInfo> {
                         bundle: b.clone(),
                         name: c.name,
                         vendor: c.vendor,
-                        class_id: crate::util::hex(&c.cid),
+                        class_id: crate::util::class_id_string(&c.cid),
                         sub_categories: c.sub_categories,
                     });
                 }

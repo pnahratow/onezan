@@ -47,7 +47,27 @@ pub fn tuid_bytes(t: &TUID) -> [u8; 16] {
     out
 }
 
-pub fn hex(cid: &[u8; 16]) -> String {
+/// A class id as the VST3 SDK prints it (`FUID::toString`): the same 32 hex digits for a plugin
+/// on every platform. On Windows the id is kept in COM's GUID layout (the first four bytes
+/// reversed, then two pairs swapped), so the bytes are put back in order first.
+pub fn class_id_string(cid: &[u8; 16]) -> String {
+    hex(&canonical(cid, cfg!(windows)))
+}
+
+/// `cid` in the SDK's canonical byte order; `com` when it is in COM's GUID layout.
+fn canonical(cid: &[u8; 16], com: bool) -> [u8; 16] {
+    if !com {
+        return *cid;
+    }
+    let order = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+    let mut out = [0u8; 16];
+    for (o, &i) in out.iter_mut().zip(order.iter()) {
+        *o = cid.get(i).copied().unwrap_or(0);
+    }
+    out
+}
+
+fn hex(cid: &[u8; 16]) -> String {
     cid.iter().fold(String::with_capacity(32), |mut s, b| {
         // Writing to a String cannot fail.
         let _ = write!(s, "{b:02X}");
@@ -58,4 +78,23 @@ pub fn hex(cid: &[u8; 16]) -> String {
 /// A count or index as VST3's `int32`, saturating. Every count handed over is capped far below.
 pub fn int32(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Surge XT's class id, as Linux and Windows hold it in memory.
+    #[test]
+    fn class_ids_print_the_same_on_every_platform() {
+        let linux: [u8; 16] = [
+            0xAB, 0xCD, 0xEF, 0x01, 0x91, 0x82, 0xFA, 0xEB, 0x56, 0x6D, 0x62, 0x41, 0x53, 0x67, 0x58, 0x54,
+        ];
+        let windows: [u8; 16] = [
+            0x01, 0xEF, 0xCD, 0xAB, 0x82, 0x91, 0xEB, 0xFA, 0x56, 0x6D, 0x62, 0x41, 0x53, 0x67, 0x58, 0x54,
+        ];
+        let want = "ABCDEF019182FAEB566D624153675854";
+        assert_eq!(hex(&canonical(&linux, false)), want);
+        assert_eq!(hex(&canonical(&windows, true)), want);
+    }
 }

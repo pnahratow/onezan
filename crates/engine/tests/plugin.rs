@@ -102,4 +102,45 @@ mod tests {
             "still sounding 2 s after the pedal is up"
         );
     }
+
+    #[test]
+    fn state_restores_into_a_fresh_instance() {
+        let Some(a) = plugin() else { return };
+        let saved = a.state().unwrap();
+        assert!(!saved.component.is_empty(), "the plugin wrote no state");
+        drop(a);
+        // Surge XT keeps its patch as XML: rename it (same length, so its own size fields stay
+        // right) to tell a restored state from a fresh one.
+        let mut changed = saved;
+        let renamed = replace(&mut changed.component, b"name=\"Init Saw\"", b"name=\"Init Sax\"");
+        let Some(mut b) = plugin() else { return };
+        let state = onezan_vst3_host::State::from_bytes(&changed.to_bytes()).unwrap();
+        b.set_state(&state).unwrap();
+        let after = b.state().unwrap();
+        if renamed {
+            assert!(
+                contains(&after.component, b"name=\"Init Sax\""),
+                "the restored patch name is lost"
+            );
+        } else {
+            eprintln!("not Surge XT's default patch: checked only that the state is taken back");
+            assert_eq!(after.component, changed.component);
+        }
+        // And it still plays.
+        let (l, _) = render_offline(&mut b, RATE, SEC / 2, vec![(0, on())]).unwrap();
+        assert!(peak(&l) > 1e-3, "silent after restoring");
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Replaces the first `from` in `bytes` with `to` (same length); whether it was there.
+    fn replace(bytes: &mut [u8], from: &[u8], to: &[u8]) -> bool {
+        let Some(i) = bytes.windows(from.len()).position(|w| w == from) else {
+            return false;
+        };
+        bytes[i..][..to.len()].copy_from_slice(to);
+        true
+    }
 }
