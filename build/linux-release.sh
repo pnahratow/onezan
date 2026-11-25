@@ -8,7 +8,11 @@ cd "$(dirname "$0")/.."
 # The built-in piano, embedded in the binary (fetched here: the container sees the repository).
 build/fetch-piano.sh
 image=onezan-build-linux
-if command -v podman >/dev/null; then
+# ENGINE=docker (or podman) picks one; CI uses Docker.
+if [ "${ENGINE:-}" = docker ]; then
+  engine=docker
+  as_user="-u $(id -u):$(id -g)"
+elif [ "${ENGINE:-}" = podman ] || command -v podman >/dev/null; then
   engine=podman
   # Rootless: the container's user is mapped to the calling user, so files in target/ stay theirs.
   as_user="--userns=keep-id"

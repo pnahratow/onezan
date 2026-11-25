@@ -1,0 +1,81 @@
+# The release builds: the Linux binary (tarball and AppImage) and the Windows zip, with the same
+# scripts as on a developer machine (build/*.sh).
+#
+# - A pushed tag v* builds everything and makes a draft release with the files: check it, then
+#   publish it on GitHub.
+# - Run by hand (Actions → Release → Run workflow), it only builds; the files are under the run's
+#   artifacts.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools
+      - name: Built-in piano (cached)
+        uses: actions/cache@v4
+        with:
+          path: assets/piano
+          key: piano-${{ hashFiles('build/fetch-piano.sh') }}
+      - name: Build (Ubuntu 20.04 container, glibc 2.31)
+        run: ENGINE=docker build/linux-release.sh
+      - name: Package (tarball and AppImage)
+        run: build/linux-package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            target/linux-package/*.tar.gz
+            target/linux-package/*.AppImage
+          if-no-files-found: error
+
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 libarchive-tools zip
+          rustup target add x86_64-pc-windows-gnu
+      - name: Built-in piano (cached)
+        uses: actions/cache@v4
+        with:
+          path: assets/piano
+          key: piano-${{ hashFiles('build/fetch-piano.sh') }}
+      - name: Build and zip (cross-compiled with MinGW)
+        run: build/windows-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/windows-release/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes \
+            --title "onezan $GITHUB_REF_NAME"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Everything to run before a commit (there is no CI): formatting, clippy for Linux and Windows,
+# Everything to run before a commit (CI runs the --quick part on GitHub): formatting, clippy for Linux and Windows,
 # and the tests on Linux and, as Windows binaries, under Wine.
 # Usage: build/check.sh [--quick]   (--quick: Linux only, no Wine)
 # Tests that need a VST3 plugin, the built-in piano (build/fetch-piano.sh) or a MIDI port skip

@@ -55,7 +55,18 @@ build/linux-release.sh      # -> target/linux-release/release/onezan
 ```
 
 It needs only Podman on the build machine, and only glibc and ALSA (`libasound.so.2`) on the
-machine it runs on; graphics and JACK are loaded at runtime.
+machine it runs on; graphics and JACK are loaded at runtime. `ENGINE=docker` uses Docker even
+when Podman is installed.
+
+Then package it as a tarball (binary, README, licences) and an AppImage (with the icon and menu
+entry from `assets/icon/` and `build/linux/onezan.desktop`):
+
+```sh
+build/linux-package.sh [DIR]   # -> target/linux-package/onezan-VERSION-COMMIT-{linux-x64.tar.gz,x86_64.AppImage}
+```
+
+It downloads appimagetool and the AppImage runtime (pinned versions, checked by SHA-256) into
+`target/appimage-tools/` the first time.
 
 ## Windows release build
 
@@ -72,6 +83,20 @@ build/windows-release.sh [DIR]   # -> target/windows-release/onezan-VERSION-COMM
 
 With a folder given, the zip is copied there too. A build from uncommitted changes is named
 `COMMIT-dirty`.
+
+## GitHub Actions
+
+- **CI** (`.github/workflows/ci.yml`): `build/check.sh --quick` (formatting, clippy, tests on
+  Linux) on every push to master and every pull request.
+- **Release** (`.github/workflows/release.yml`): the Linux and Windows builds above. Pushing a
+  tag `v*` builds everything and makes a **draft** release with the files, to check and publish
+  by hand. Run by hand (Actions → Release → Run workflow) it only builds; the files are the run's
+  artifacts.
+
+## Icon
+
+`assets/icon/onezan.svg` (dragon scales: scales, as in piano scales) is the source;
+`assets/icon/onezan.png` is rendered from it with `rsvg-convert -w 256`.
 
 ## Layout
 

@@ -145,7 +145,11 @@ embedded editor. The user considers this state good for a v1 tag.
 
 ## Next steps, in order
 
-1. **v1**: final touch-ups, check the clef column on Windows, version 1.0.0, tag.
+1. **v1**: final touch-ups, check the clef column on Windows, version 1.0.0, tag. The repo is
+   public at github.com/pnahratow/onezan; CI and the release workflow (Linux tarball, AppImage,
+   Windows zip, a draft release per tag) are in `.github/workflows/` (see docs/BUILDING.md).
+   The icon (`assets/icon/`) is used by the AppImage only; the window and the Windows exe have
+   none yet.
 2. **Scale trainer basics**: hands separately and contrary motion, choosing octaves, showing the
    way down (melodic minor differs), the learning order (`fingering::LEARNING_ORDER`) as a path.
    The table is done (see "Fingering table" below).

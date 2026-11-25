@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=onezan
+GenericName=Scale trainer
+Comment=Practise piano scales with your MIDI keyboard
+Exec=onezan
+Icon=onezan
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=piano;scales;fingering;MIDI;VST3;metronome;
