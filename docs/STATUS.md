@@ -414,8 +414,9 @@ made on purpose; the startup report's plugin line says what happened.
   (`PAUSE`) left out; worked out when read, so it can change later. A damaged file is moved
   aside and a new one started.
 - **Scales window**: the bar's "Scale: ..." button opens it (an OS window of its own, like the
-  options). All 48 scales with time spent and last played, ordered by learning order, most or
-  least practised; click to show one, "No scale" to clear. Re-reads the history every 3 s while
+  options). All 48 scales with time spent and last played, ordered by learning order or by name
+  (alphabetical); click to show one, "No scale" to clear. A star per row marks favorites: they are
+  listed first, under "Favorites", and kept in settings.json as `favorite_scales` (by name). Re-reads the history every 3 s while
   open.
 - **Buttons**: every button has a lighter fill and a visible border (brighter on hover, darker
   pressed); toggles (Metronome, Scale, Options, the order) are real buttons that stay highlighted
@@ -454,6 +455,11 @@ same code as at startup (`start_session`), with the keyboard in use, the metrono
 whether it was running, and the scale. The new instrument's own saved sound is restored, and it
 is remembered for the next start. If it fails, the previous instrument is started again and the
 window says why in red. The window keeps its size (the new editor is fitted into it).
+
+**Favorites.** Each row has a star (☆/★). Starred instruments (the built-in piano too) are listed
+first, under "Favorites", then "All instruments" with the rest. The class ids are kept in
+settings.json as `favorite_instruments`, in the order starred; a starred plugin that is uninstalled is simply
+not listed (its id stays, so it comes back if reinstalled). Not checked with the mouse yet.
 
 Checked in the VM with a throwaway build that switched by itself (no click tool here): a switch
 to Surge XT again (full teardown and restart: sound saved and restored, editor embedded again,

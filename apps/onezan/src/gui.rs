@@ -154,6 +154,10 @@ struct App {
     open: OpenWindows,
     /// The installed instruments, scanned when that window first opens (and on "Rescan").
     instruments: Option<Vec<PluginInfo>>,
+    /// The starred instruments (class ids, in the order starred); listed first in that window.
+    favorite_instruments: Vec<String>,
+    /// The starred scales (by name, in the order starred); listed first in the scales window.
+    favorite_scales: Vec<String>,
     /// Why the last switch of instrument did not work.
     instrument_note: Option<String>,
     /// Why the last audio output chosen did not work.
@@ -229,6 +233,8 @@ impl App {
             last_chord: None,
             open: OpenWindows::default(),
             instruments: None,
+            favorite_instruments: settings.favorite_instruments.clone(),
+            favorite_scales: settings.favorite_scales.clone(),
             instrument_note: None,
             audio_note: None,
             menus: MenuLists::default(),
@@ -291,6 +297,8 @@ impl App {
                 },
             ),
             midi,
+            favorite_instruments: self.favorite_instruments.clone(),
+            favorite_scales: self.favorite_scales.clone(),
         }
     }
 
@@ -514,7 +522,8 @@ impl App {
             .with_title("onezan instruments")
             .with_app_id("onezan")
             .with_inner_size([440.0, 420.0]);
-        let (mut pick, mut rescan) = (None, false);
+        let (mut pick, mut rescan, mut toggle_star) = (None, false, None::<String>);
+        let favorites = &self.favorite_instruments;
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("instruments"), builder, |ui, _| {
             egui::CentralPanel::default().show(ui, |ui| {
                 if let Some(n) = &note {
@@ -538,31 +547,54 @@ impl App {
                     ui.label(format!("No VST3 instruments found in:\n{}", dirs.join("\n")));
                     ui.separator();
                 }
+                // The built-in piano first, then the plugins; starred ones in a group above.
+                let mut rows: Vec<(String, String, String)> = Vec::new();
+                if crate::piano::available() {
+                    rows.push((
+                        onezan_engine::BUILT_IN_PIANO.to_owned(),
+                        format!("{}   FreePats Upright Piano KW", crate::piano::NAME),
+                        "Built into onezan: a Kawai upright piano (public domain)".to_owned(),
+                    ));
+                }
+                rows.extend(list.iter().map(|p| {
+                    (
+                        p.class_id.clone(),
+                        format!("{}   {}", p.name, p.vendor),
+                        p.bundle.display().to_string(),
+                    )
+                }));
+                let (starred, rest): (Vec<_>, Vec<_>) = rows.iter().partition(|(id, ..)| favorites.contains(id));
+                let mut row = |ui: &mut egui::Ui, (id, text, hover): &(String, String, String)| {
+                    ui.horizontal(|ui| {
+                        if star(ui, favorites.contains(id)) {
+                            toggle_star = Some(id.clone());
+                        }
+                        let selected = current.as_deref() == Some(id.as_str());
+                        let r = ui.selectable_label(selected, text).on_hover_text(hover);
+                        if r.clicked() && !selected {
+                            pick = Some(id.clone());
+                        }
+                    });
+                };
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    if crate::piano::available() {
-                        let selected = current.as_deref() == Some(onezan_engine::BUILT_IN_PIANO);
-                        let text = format!("{}   FreePats Upright Piano KW", crate::piano::NAME);
-                        let r = ui
-                            .selectable_label(selected, text)
-                            .on_hover_text("Built into onezan: a Kawai upright piano (public domain)");
-                        if r.clicked() && !selected {
-                            pick = Some(onezan_engine::BUILT_IN_PIANO.to_owned());
+                    if !starred.is_empty() {
+                        ui.label(RichText::new("Favorites").strong());
+                        for r in &starred {
+                            row(ui, r);
                         }
+                        ui.separator();
+                        ui.label(RichText::new("All instruments").strong());
                     }
-                    for p in list.iter() {
-                        let selected = current.as_deref() == Some(p.class_id.as_str());
-                        let text = format!("{}   {}", p.name, p.vendor);
-                        let r = ui
-                            .selectable_label(selected, text)
-                            .on_hover_text(p.bundle.display().to_string());
-                        if r.clicked() && !selected {
-                            pick = Some(p.class_id.clone());
-                        }
+                    for r in &rest {
+                        row(ui, r);
                     }
                 });
             });
             ui.ctx().input(|i| i.viewport().close_requested())
         });
+        if let Some(id) = toggle_star {
+            toggle_favorite(&mut self.favorite_instruments, &id);
+        }
         if rescan {
             self.instruments = None;
         }
@@ -575,7 +607,7 @@ impl App {
     }
 
     /// The scales, in a window of their own: pick one, see the time spent on each, in the
-    /// learning order or by time spent.
+    /// learning order or by name; starred ones first.
     fn scales_window(&mut self, ctx: &egui::Context) {
         // The practice figures are read again every few seconds while the window is open.
         if self.practice_read.is_none_or(|t| t.elapsed() >= PRACTICE_REFRESH)
@@ -590,6 +622,7 @@ impl App {
             .with_app_id("onezan")
             .with_inner_size([460.0, 640.0]);
         let (preview, order, practice) = (&mut self.preview, &mut self.scale_order, &self.practice);
+        let favorites = &mut self.favorite_scales;
         let history = self.recorder.is_some();
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("scales"), builder, |ui, _| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -614,7 +647,7 @@ impl App {
                     }
                 });
                 ui.separator();
-                scale_list(ui, preview, *order, practice);
+                scale_list(ui, preview, *order, practice, favorites);
             });
             ui.ctx().input(|i| i.viewport().close_requested())
         });
@@ -975,26 +1008,54 @@ const PRACTICE_REFRESH: Duration = Duration::from_secs(3);
 enum ScaleOrder {
     /// By type, then C, G, D, A, E, B, F, Db, Gb, Bb, Eb, Ab.
     Learning,
-    /// Most time spent first.
-    Most,
-    /// Least time spent first: what needs practice.
-    Least,
+    /// Alphabetical: "A harmonic minor", "A major", ...
+    Name,
 }
 
 impl ScaleOrder {
-    const ALL: [Self; 3] = [Self::Learning, Self::Most, Self::Least];
+    const ALL: [Self; 2] = [Self::Learning, Self::Name];
 
     const fn name(self) -> &'static str {
         match self {
             Self::Learning => "Learning order",
-            Self::Most => "Most practised",
-            Self::Least => "Least practised",
+            Self::Name => "Name",
         }
     }
 }
 
-/// The scales in `order`, as a table: name, time spent, last played. Clicking one shows it.
-fn scale_list(ui: &mut egui::Ui, preview: &mut Preview, order: ScaleOrder, practice: &HashMap<String, Practice>) {
+/// A star to click: filled for a favorite. Returns whether it was clicked.
+fn star(ui: &mut egui::Ui, is_fav: bool) -> bool {
+    let (text, tip) = if is_fav {
+        (
+            RichText::new("★").color(Color32::from_rgb(250, 204, 21)),
+            "Remove from favorites",
+        )
+    } else {
+        (RichText::new("☆").weak(), "Add to favorites")
+    };
+    ui.add(egui::Button::new(text).frame(false))
+        .on_hover_text(tip)
+        .clicked()
+}
+
+/// Adds `id` to `favorites`, or removes it if it is there.
+fn toggle_favorite(favorites: &mut Vec<String>, id: &str) {
+    if let Some(i) = favorites.iter().position(|f| f == id) {
+        favorites.remove(i);
+    } else {
+        favorites.push(id.to_owned());
+    }
+}
+
+/// The scales in `order`, starred ones first, as a table: star, name, time spent, last
+/// played. Clicking a name shows it; clicking the star (un)marks it as a favorite.
+fn scale_list(
+    ui: &mut egui::Ui,
+    preview: &mut Preview,
+    order: ScaleOrder,
+    practice: &HashMap<String, Practice>,
+    favorites: &mut Vec<String>,
+) {
     let mut scales: Vec<(Scale, String, Practice)> = Scale::all()
         .map(|s| {
             let name = s.name();
@@ -1002,41 +1063,59 @@ fn scale_list(ui: &mut egui::Ui, preview: &mut Preview, order: ScaleOrder, pract
             (s, name, p)
         })
         .collect();
-    // A stable sort: equal times keep the learning order.
     match order {
         ScaleOrder::Learning => {}
-        ScaleOrder::Most => scales.sort_by_key(|(_, _, p)| std::cmp::Reverse(p.time)),
-        ScaleOrder::Least => scales.sort_by_key(|(_, _, p)| p.time),
+        ScaleOrder::Name => scales.sort_by(|a, b| a.1.cmp(&b.1)),
     }
+    let (starred, rest): (Vec<_>, Vec<_>) = scales.into_iter().partition(|(_, name, _)| favorites.contains(name));
+    let grouped = !starred.is_empty();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| i64::try_from(d.as_millis()).ok());
+    let mut toggle = None;
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Grid::new("scales")
-            .num_columns(3)
+            .num_columns(4)
             .striped(true)
             .spacing([18.0, 6.0])
             .show(ui, |ui| {
+                ui.label("");
                 ui.label(RichText::new("Scale").strong());
                 ui.label(RichText::new("Time spent").strong());
                 ui.label(RichText::new("Last played").strong());
                 ui.end_row();
-                for (scale, name, p) in scales {
-                    let selected = *preview == Preview::Scale(scale);
-                    if ui.selectable_label(selected, &name).clicked() {
-                        *preview = Preview::Scale(scale);
+                for (title, list, is_fav) in [("Favorites", starred, true), ("All scales", rest, false)] {
+                    if list.is_empty() {
+                        continue;
                     }
-                    ui.label(spent(p.time));
-                    ui.label(
-                        p.last_ms
-                            .zip(now)
-                            .map_or_else(|| "–".to_owned(), |(t, n)| ago(n.saturating_sub(t))),
-                    );
-                    ui.end_row();
+                    if grouped {
+                        ui.label("");
+                        ui.label(RichText::new(title).weak());
+                        ui.end_row();
+                    }
+                    for (scale, name, p) in list {
+                        if star(ui, is_fav) {
+                            toggle = Some(name.clone());
+                        }
+                        let selected = *preview == Preview::Scale(scale);
+                        if ui.selectable_label(selected, &name).clicked() {
+                            *preview = Preview::Scale(scale);
+                        }
+                        ui.label(spent(p.time));
+                        ui.label(
+                            p.last_ms
+                                .zip(now)
+                                .map_or_else(|| "–".to_owned(), |(t, n)| ago(n.saturating_sub(t))),
+                        );
+                        ui.end_row();
+                    }
                 }
             });
     });
+    if let Some(name) = toggle {
+        toggle_favorite(favorites, &name);
+    }
 }
 
 /// "45 s", "12 min", "1 h 05 min"; "–" for none.

@@ -32,6 +32,12 @@ pub struct Settings {
     /// The MIDI timing ("auto", "exact", "immediate"); missing: auto.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi_timing: Option<String>,
+    /// The instruments starred in the instruments window (plugin class ids), listed first there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub favorite_instruments: Vec<String>,
+    /// The scales starred in the scales window (by name, "D major"), listed first there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub favorite_scales: Vec<String>,
 }
 
 /// An audio output: the audio system ("ALSA", "JACK", "WASAPI") and the device's name.
@@ -209,6 +215,8 @@ mod tests {
                 device: "default".into(),
             }),
             midi_timing: Some("exact".into()),
+            favorite_instruments: vec!["ABCD".into(), "built-in-piano".into()],
+            favorite_scales: vec!["D major".into()],
         }
     }
 
@@ -225,6 +233,8 @@ mod tests {
                 backend: "JACK".into(),
                 device: "default".into(),
             }),
+            favorite_instruments: Vec::new(),
+            favorite_scales: Vec::new(),
             ..sample()
         };
         assert_eq!(s, expected);
