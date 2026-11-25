@@ -5,6 +5,8 @@
 # Output: target/linux-release/release/onezan
 set -eu
 cd "$(dirname "$0")/.."
+# The built-in piano, embedded in the binary (fetched here: the container sees the repository).
+build/fetch-piano.sh
 image=onezan-build-linux
 if command -v podman >/dev/null; then
   engine=podman

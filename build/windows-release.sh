@@ -6,6 +6,8 @@
 # Output: target/windows-release/onezan-VERSION-COMMIT-windows-x64.zip
 set -eu
 cd "$(dirname "$0")/.."
+# The built-in piano, embedded in the exe.
+build/fetch-piano.sh
 target=x86_64-pc-windows-gnu
 cargo build --release --locked --target "$target"
 exe="target/$target/release/onezan.exe"
@@ -24,7 +26,7 @@ name="onezan-$version-$commit-windows-x64"
 out=target/windows-release
 rm -rf "${out:?}/$name" "$out/$name.zip"
 mkdir -p "$out/$name"
-# Without the debug symbols: 27 MB to 20 MB.
+# Without the debug symbols.
 x86_64-w64-mingw32-strip -o "$out/$name/onezan.exe" "$exe"
 # The GPL asks for the licence to travel with the program.
 cp README.md LICENSE "$out/$name/"

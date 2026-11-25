@@ -17,6 +17,7 @@ mod fingering;
 mod gui;
 mod instrument_state;
 mod keyboard;
+mod piano;
 mod plugins;
 mod progress;
 mod report;
@@ -179,6 +180,15 @@ fn list(all: bool) {
             onezan_vst3_host::default_search_paths()
         );
     }
+    if crate::piano::available() {
+        println!(
+            "{:<28} {:<20} {:<24} {}",
+            crate::piano::NAME,
+            "FreePats",
+            "Instrument|Piano",
+            onezan_engine::BUILT_IN_PIANO
+        );
+    }
     for p in shown {
         println!(
             "{:<28} {:<20} {:<24} {}  {}",
@@ -236,8 +246,9 @@ fn play_scale(mut tx: onezan_engine::Producer<TimedEvent>) {
 }
 
 fn render(plugin_arg: Option<&str>, sample_rate: u32) -> Result<()> {
-    let (mut plugin, plugins) = load(plugin_arg)?;
-    print_section("plugin", &plugins, "", "");
+    let loaded = load(plugin_arg)?;
+    let mut instrument = loaded.instrument;
+    print_section("plugin", &loaded.considered, "", "");
     // A quarter second per note, sounding for 90% of it; two silent notes' worth at the end.
     let step = usize::try_from(sample_rate / 4).context("sample rate too high")?;
     let sounding = step.saturating_mul(9) / 10;
@@ -263,7 +274,7 @@ fn render(plugin_arg: Option<&str>, sample_rate: u32) -> Result<()> {
         at = at.saturating_add(step);
     }
     let frames = at.saturating_add(step.saturating_mul(2));
-    let (l, r) = onezan_engine::render_offline(&mut plugin, sample_rate, frames, events)?;
+    let (l, r) = onezan_engine::render_offline(&mut instrument, sample_rate, frames, events)?;
     let peak = l.iter().chain(&r).fold(0.0f32, |m, s| m.max(s.abs()));
     let (sum, count) = l.iter().chain(&r).fold((0.0f64, 0.0f64), |(sum, n), s| {
         let s = f64::from(*s);
@@ -277,7 +288,7 @@ fn render(plugin_arg: Option<&str>, sample_rate: u32) -> Result<()> {
         db(rms)
     );
     if peak == 0.0 {
-        bail!("the plugin produced silence");
+        bail!("the instrument produced silence");
     }
     Ok(())
 }

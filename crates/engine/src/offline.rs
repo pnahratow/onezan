@@ -1,23 +1,24 @@
 //! Rendering without an audio device, for checks.
 
+use crate::instrument::Instrument;
 use anyhow::Result;
-use onezan_vst3_host::{MidiEvent, Plugin};
+use onezan_vst3_host::MidiEvent;
 
-/// Renders `frames` frames of `plugin` offline, applying each `(frame, event)` at its frame.
+/// Renders `frames` frames of `instrument` offline, applying each `(frame, event)` at its frame.
 /// For checks without an audio device.
 ///
 /// # Errors
 ///
-/// When the plugin cannot start.
+/// When the instrument cannot start.
 pub fn render_offline(
-    plugin: &mut Plugin,
+    instrument: &mut Instrument,
     sample_rate: u32,
     frames: usize,
     mut events: Vec<(usize, MidiEvent)>,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
     const BLOCK: usize = 256;
     events.sort_by_key(|(at, _)| *at);
-    let mut p = plugin.start(f64::from(sample_rate), BLOCK)?;
+    let mut p = instrument.start(sample_rate, BLOCK)?;
     let (mut left, mut right) = (vec![0.0; frames], vec![0.0; frames]);
     let mut pending = events.into_iter().peekable();
     let mut block_events = Vec::new();
@@ -31,6 +32,6 @@ pub fn render_offline(
         p.process(&block_events, l, r);
     }
     drop(p);
-    plugin.stop();
+    instrument.stop();
     Ok((left, right))
 }

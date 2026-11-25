@@ -1,4 +1,5 @@
-//! The real-time part of onezan: MIDI in, a plugin in the middle, audio out.
+//! The real-time part of onezan: MIDI in, an instrument (a plugin or the built-in piano) in
+//! the middle, audio out.
 //!
 //! MIDI arrives on midir's thread, is stamped with its arrival time and passed to the audio
 //! callback through lock-free SPSC queues (`rtrb`); the callback drains them at the start of each
@@ -6,6 +7,7 @@
 //!
 //! - `midi_in`: picks the keyboard and keeps it connected; what is held, for display.
 //! - `audio_out`: picks the output with the lowest latency and opens the stream.
+//! - `instrument`: a VST3 plugin or the built-in SoundFont piano, and its audio-thread half.
 //! - `callback`: the audio callback (no allocation, no locks).
 //! - `timing`: where in a block each live event plays.
 //! - `metronome`: clicks made in the audio callback, on their exact sample.
@@ -14,6 +16,7 @@
 
 mod audio_out;
 mod callback;
+pub mod instrument;
 pub mod metronome;
 pub mod midi_in;
 mod offline;
@@ -21,6 +24,7 @@ mod report;
 pub mod timing;
 
 pub use audio_out::{AudioOut, Output, REQUESTED_FRAMES, audio_outputs, request_low_latency};
+pub use instrument::{BUILT_IN_PIANO, Instrument, Piano, Voice};
 pub use metronome::{Click, Metronome};
 pub use midi_in::{Keys, MidiChange, MidiWatch, choose_midi_port, midi_input_ports};
 pub use offline::render_offline;

@@ -1,6 +1,7 @@
 # onezan
 
-Play your MIDI keyboard through a real VST3 instrument, on Linux and Windows.
+Play your MIDI keyboard through a real VST3 instrument, on Linux and Windows. Without one, it
+plays its built-in piano.
 The long-term goal is a scale trainer with fingering display, a learning order, a metronome and
 progress tracking. This first milestone is the instrument host it will sit on.
 
@@ -14,6 +15,14 @@ JACK at runtime and runs without it.
 |---|---|
 | Debian, Ubuntu, Linux Mint | `sudo apt install libasound2-dev libjack-jackd2-dev pkg-config` |
 | Arch | `sudo pacman -S alsa-lib pipewire-jack pkgconf` (or `jack2` instead of `pipewire-jack`) |
+
+The built-in piano is a 57 MB SoundFont, embedded in the program but not kept in git. Fetch it
+once (needs `curl` and `bsdtar` or `7z`); without it the program builds, with a warning, and has no
+built-in piano. The release scripts below fetch it themselves.
+
+```sh
+build/fetch-piano.sh        # -> assets/piano/
+```
 
 Tested on Linux Mint 22 (the Debian line) and Arch (the Arch line). Windows should need nothing
 beyond Rust (not tried yet).
@@ -54,6 +63,7 @@ cargo run --release -- play "Surge XT" --midi "Keystation"
 cargo run --release -- play --demo     # plays a C major scale through the plugin
 cargo run --release -- play --metronome 90   # with the metronome (the window has it too)
 cargo run --release -- render          # offline render check, no audio device needed
+cargo run --release -- play built-in   # the built-in piano, even when plugins are installed
 ```
 
 Plugins are searched in `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` (Linux) and
@@ -62,6 +72,14 @@ Plugins are searched in `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` (Linux
 On Debian, Ubuntu and Mint, PipeWire's JACK library is not on the library path: for the lowest
 latency, install `pipewire-jack` and start with `pw-jack onezan` (the app says so when it
 applies).
+
+## The built-in piano
+
+When no VST3 instrument is installed, or none loads, onezan plays its built-in piano; it can also
+be chosen in the window (Instrument). It is [FreePats](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html)'
+"Upright Piano KW", a Kawai upright recorded by Gonzalo and Roberto in 2017 and published under
+the Creative Commons CC0 1.0 public domain dedication, played with
+[rustysynth](https://github.com/sinshu/rustysynth) (MIT).
 
 ## Where the fingerings come from
 
@@ -93,7 +111,7 @@ sometimes prefer others. If your teacher gives you a different one, follow your 
 ## Not done yet
 
 - The plugin's editor on Windows (HWND), presets.
-- CLAP hosting (`clack-host`), a built-in fallback sound.
+- CLAP hosting (`clack-host`).
 - macOS module loading.
 
 ## Status

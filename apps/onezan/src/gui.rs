@@ -281,7 +281,14 @@ impl App {
             window: self.window_size,
             instrument: self.session.as_ref().map_or_else(
                 || self.saved.instrument.clone(),
-                |s| Some(s.plugin().class_id().to_owned()),
+                // The built-in piano standing in is not a choice: keep the one saved.
+                |s| {
+                    if s.is_fallback() {
+                        self.saved.instrument.clone()
+                    } else {
+                        Some(s.instrument().id().to_owned())
+                    }
+                },
             ),
             midi,
         }
@@ -455,7 +462,7 @@ impl App {
         let now = self.settings();
         let ticking = self.session.as_ref().is_some_and(|s| s.metronome().is_on());
         let chosen_midi = self.session.as_ref().and_then(|s| s.chosen_midi().map(str::to_owned));
-        let previous = self.session.as_ref().map(|s| s.plugin().class_id().to_owned());
+        let previous = self.session.as_ref().map(|s| s.instrument().id().to_owned());
         // In this order: the editor leaves its window, then the plugin goes.
         drop(self.embedded.borrow_mut().take());
         drop(self.editor.take());
@@ -501,7 +508,7 @@ impl App {
                 .filter(PluginInfo::is_instrument)
                 .collect()
         });
-        let current = self.session.as_ref().map(|s| s.plugin().class_id().to_owned());
+        let current = self.session.as_ref().map(|s| s.instrument().id().to_owned());
         let note = self.instrument_note.clone();
         let builder = egui::ViewportBuilder::default()
             .with_title("onezan instruments")
@@ -529,8 +536,19 @@ impl App {
                     let dirs = onezan_vst3_host::default_search_paths();
                     let dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
                     ui.label(format!("No VST3 instruments found in:\n{}", dirs.join("\n")));
+                    ui.separator();
                 }
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    if crate::piano::available() {
+                        let selected = current.as_deref() == Some(onezan_engine::BUILT_IN_PIANO);
+                        let text = format!("{}   FreePats Upright Piano KW", crate::piano::NAME);
+                        let r = ui
+                            .selectable_label(selected, text)
+                            .on_hover_text("Built into onezan: a Kawai upright piano (public domain)");
+                        if r.clicked() && !selected {
+                            pick = Some(onezan_engine::BUILT_IN_PIANO.to_owned());
+                        }
+                    }
                     for p in list.iter() {
                         let selected = current.as_deref() == Some(p.class_id.as_str());
                         let text = format!("{}   {}", p.name, p.vendor);
@@ -656,6 +674,19 @@ impl App {
         ui.centered_and_justified(|ui| match (&self.session, &self.error) {
             (_, Some(e)) => {
                 ui.label(RichText::new(e).color(Color32::from_rgb(239, 68, 68)));
+            }
+            (Some(s), None) if s.instrument().plugin().is_none() => {
+                let mut text = format!(
+                    "{}\n\nFreePats \"Upright Piano KW\", a Kawai upright piano (public domain).",
+                    crate::piano::NAME
+                );
+                if s.is_fallback() {
+                    text.push_str(
+                        "\nNo VST3 instrument could be loaded. Install one and choose it under Instrument \
+                         for other sounds.",
+                    );
+                }
+                ui.label(RichText::new(text).weak());
             }
             (Some(s), None) => {
                 let name = s.section("plugin").map_or("", |p| p.short.as_str());
@@ -806,7 +837,10 @@ fn start_session(
 
 /// The instrument's own editor, to embed at the next frame; or why there is none.
 fn make_editor(ctx: &egui::Context, session: &Session) -> (Option<Editor>, Option<String>) {
-    match session.plugin().editor() {
+    let Some(plugin) = session.instrument().plugin() else {
+        return (None, None);
+    };
+    match plugin.editor() {
         Ok(e) => {
             let repaint = ctx.clone();
             e.set_waker(move || repaint.request_repaint());

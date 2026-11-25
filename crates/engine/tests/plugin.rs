@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use onezan_engine::render_offline;
+    use onezan_engine::{Instrument, render_offline};
     use onezan_vst3_host::{MidiEvent, Plugin};
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -67,11 +67,11 @@ mod tests {
     #[test]
     fn note_starts_at_its_frame_not_its_block() {
         let _one = one_at_a_time();
-        let Some(mut p) = plugin() else { return };
+        let Some(p) = plugin() else { return };
         // Frame 1000 lies inside the renderer's fourth 256-frame block (768..1024): a host that
         // applied events at the block start would sound from 768.
         let at = 1000;
-        let (l, r) = render_offline(&mut p, RATE, SEC / 2, vec![(at, on())]).unwrap();
+        let (l, r) = render_offline(&mut Instrument::Plugin(p), RATE, SEC / 2, vec![(at, on())]).unwrap();
         let first = first_sound(&l, &r).expect("the note sounds");
         assert!(first >= at, "sound at frame {first}, before the note at {at}");
         assert!(
@@ -83,9 +83,9 @@ mod tests {
     #[test]
     fn released_note_goes_silent() {
         let _one = one_at_a_time();
-        let Some(mut p) = plugin() else { return };
+        let Some(p) = plugin() else { return };
         let len = SEC * 3;
-        let (l, r) = render_offline(&mut p, RATE, len, vec![(0, on()), (SEC / 4, off())]).unwrap();
+        let (l, r) = render_offline(&mut Instrument::Plugin(p), RATE, len, vec![(0, on()), (SEC / 4, off())]).unwrap();
         assert!(peak(&l[..SEC / 4]) > 1e-3, "the note sounds while held");
         let tail = len - SEC / 2;
         assert!(
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn sustain_pedal_holds_then_releases() {
         let _one = one_at_a_time();
-        let Some(mut p) = plugin() else { return };
+        let Some(p) = plugin() else { return };
         let s = SEC;
         let pedal = |value| MidiEvent::ControlChange {
             channel: 0,
@@ -106,7 +106,7 @@ mod tests {
         };
         // Pedal down, note on, note off at 0.25 s (pedal still down), pedal up at 1.5 s.
         let events = vec![(0, pedal(127)), (10, on()), (s / 4, off()), (s * 3 / 2, pedal(0))];
-        let (l, r) = render_offline(&mut p, RATE, s * 4, events).unwrap();
+        let (l, r) = render_offline(&mut Instrument::Plugin(p), RATE, s * 4, events).unwrap();
         let held = peak(&l[s..s * 3 / 2]).max(peak(&r[s..s * 3 / 2]));
         assert!(held > 1e-3, "the pedal does not hold the note (level {held})");
         let tail = s * 7 / 2;
@@ -141,7 +141,7 @@ mod tests {
             assert_eq!(after.component, changed.component);
         }
         // And it still plays.
-        let (l, _) = render_offline(&mut b, RATE, SEC / 2, vec![(0, on())]).unwrap();
+        let (l, _) = render_offline(&mut Instrument::Plugin(b), RATE, SEC / 2, vec![(0, on())]).unwrap();
         assert!(peak(&l) > 1e-3, "silent after restoring");
     }
 

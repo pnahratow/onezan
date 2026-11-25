@@ -11,6 +11,7 @@ midir.workspace = true
 rtrb.workspace = true
 anyhow.workspace = true
 log.workspace = true
+rustysynth.workspace = true
 
 # JACK, which on PipeWire systems (pipewire-jack) gives the graph's own block size: the lowest
 # latency available. libjack is loaded at runtime; without it the engine falls back to ALSA.

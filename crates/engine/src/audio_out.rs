@@ -3,12 +3,12 @@
 
 use crate::MAX_FRAMES;
 use crate::callback::{Callback, Report};
+use crate::instrument::Instrument;
 use crate::metronome::Metronome;
 use crate::report::{Considered, Verdict};
 use crate::timing::{self, MidiTiming, SharedTiming, TimedEvent};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use onezan_vst3_host::Plugin;
 use rtrb::Consumer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -107,8 +107,8 @@ fn find_output(wanted: &Output) -> Result<(cpal::HostId, cpal::Device, Vec<Consi
     Ok((id, device, considered))
 }
 
-/// A running audio stream that plays the plugin. Dropping it stops the sound; drop it before
-/// the [`Plugin`].
+/// A running audio stream that plays the instrument. Dropping it stops the sound; drop it before
+/// the [`Instrument`].
 pub struct AudioOut {
     /// The audio system in use: "JACK", "ALSA", "WASAPI", ...
     pub backend: String,
@@ -257,16 +257,16 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 }
 
 impl AudioOut {
-    /// Opens `output`, or without one the best output (see [`pick_output`]); starts `plugin` at its sample rate and plays
-    /// it, feeding it the events from `inputs`, placed in each block as `timing` says, with the
+    /// Opens `output`, or without one the best output (see [`pick_output`]); starts `instrument` at its sample rate and
+    /// plays it, feeding it the events from `inputs`, placed in each block as `timing` says, with the
     /// clicks of `metronome` mixed in.
     ///
     /// # Errors
     ///
     /// When there is no usable output device (32-bit float), the one asked for is not there, the
-    /// plugin cannot start, or the stream cannot be opened.
+    /// instrument cannot start, or the stream cannot be opened.
     pub fn start(
-        plugin: &mut Plugin,
+        instrument: &mut Instrument,
         inputs: Vec<Consumer<TimedEvent>>,
         timing: MidiTiming,
         metronome: Arc<Metronome>,
@@ -286,12 +286,12 @@ impl AudioOut {
         let config = supported.config();
         let channels = usize::from(config.channels);
 
-        let processor = plugin.start(f64::from(sample_rate.0), MAX_FRAMES)?;
+        let voice = instrument.start(sample_rate.0, MAX_FRAMES)?;
         let block = Arc::new(AtomicU32::new(0));
         let report = Report { block: block.clone() };
         let timing = Arc::new(SharedTiming::new(timing));
         let mut cb = Callback::new(
-            processor,
+            voice,
             inputs,
             channels,
             sample_rate.0,

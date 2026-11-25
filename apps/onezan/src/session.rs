@@ -1,14 +1,14 @@
-//! A running instrument: the plugin, the MIDI keyboard and the audio output, as `play` and the
-//! window both use them.
+//! A running instrument: the plugin or built-in piano, the MIDI keyboard and the audio output,
+//! as `play` and the window both use them.
 
-use crate::plugins::load;
+use crate::plugins::{Loaded, load};
 use anyhow::Result;
 use onezan_engine::midi_in::POLL;
 use onezan_engine::{
-    AudioOut, Considered, Consumer, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, Output, Producer, TimedEvent,
-    Verdict, choose_midi_port, midi_queue,
+    AudioOut, Considered, Consumer, Instrument, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, Output, Producer,
+    TimedEvent, Verdict, choose_midi_port, midi_queue,
 };
-use onezan_vst3_host::{MidiEvent, Plugin};
+use onezan_vst3_host::MidiEvent;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,46 +54,39 @@ pub fn port_name(port: &str) -> &str {
     }
 }
 
-/// Loads the plugin asked for; else the one used last time; else (or when that fails) the
-/// automatic choice. Then its sound from last time.
-fn load_plugin(opts: &Options) -> Result<(Plugin, Vec<Considered>, String)> {
-    let (mut plugin, considered, note) = match (&opts.plugin, &opts.remembered.plugin) {
-        (Some(asked), _) => {
-            let (p, c) = load(Some(asked))?;
-            (p, c, String::new())
-        }
+/// Loads the instrument asked for; else the one used last time; else (or when that fails) the
+/// automatic choice (see [`load`]). Then a plugin's sound from last time.
+fn load_instrument(opts: &Options) -> Result<(Loaded, String)> {
+    let (mut loaded, note) = match (&opts.plugin, &opts.remembered.plugin) {
+        (Some(asked), _) => (load(Some(asked))?, String::new()),
         (None, Some(last)) => match load(Some(last)) {
-            Ok((p, c)) => {
-                let c = c
-                    .into_iter()
-                    .map(|mut c| {
-                        c.why = match c.verdict {
-                            Verdict::Used => "the instrument used last time".into(),
-                            _ => "not the one used last time".into(),
-                        };
-                        c
-                    })
-                    .collect();
-                (p, c, String::new())
+            Ok(mut l) => {
+                for c in &mut l.considered {
+                    c.why = match c.verdict {
+                        Verdict::Used => "the instrument used last time".into(),
+                        _ => "not the one used last time".into(),
+                    };
+                }
+                (l, String::new())
             }
             Err(e) => {
                 log::warn!("the instrument used last time: {e:#}");
-                let (p, c) = load(None)?;
-                (p, c, "the one used last time failed to load".to_string())
+                (load(None)?, "the one used last time failed to load".to_string())
             }
         },
-        (None, None) => {
-            let (p, c) = load(None)?;
-            (p, c, String::new())
-        }
+        (None, None) => (load(None)?, String::new()),
     };
-    let sound = crate::instrument_state::restore(&mut plugin);
+    let sound = loaded
+        .instrument
+        .plugin_mut()
+        .map(crate::instrument_state::restore)
+        .unwrap_or_default();
     let detail = [note, sound]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("; ");
-    Ok((plugin, considered, detail))
+    Ok((loaded, detail))
 }
 
 /// The MIDI port to ask for: the one given; else the one used last time if it is plugged in now
@@ -118,7 +111,8 @@ pub struct Section {
 }
 
 pub struct Session {
-    // Dropped in this order: MIDI input, then audio (and the plugin's processor), then the plugin.
+    // Dropped in this order: MIDI input, then audio (and the instrument's voice), then the
+    // instrument.
     watch: Option<MidiWatch>,
     audio: Option<AudioOut>,
     /// The output chosen by hand; `None`: the automatic choice.
@@ -128,7 +122,9 @@ pub struct Session {
     /// Notes played on the screen (see [`Session::play`]).
     screen: Producer<TimedEvent>,
     metronome: Arc<Metronome>,
-    plugin: Plugin,
+    instrument: Instrument,
+    /// The built-in piano stands in because no plugin could be loaded.
+    fallback: bool,
     /// The startup report: plugin, MIDI in, audio out, timing.
     pub report: Vec<Section>,
     /// The result of the first attempt to open a MIDI port (`None`: no keyboard yet).
@@ -144,12 +140,13 @@ impl Session {
         keys: Arc<Keys>,
         on_midi: impl FnMut(MidiChange) + Send + 'static,
     ) -> Result<Self> {
-        let (mut plugin, plugins, detail) = load_plugin(opts)?;
+        let (loaded, detail) = load_instrument(opts)?;
+        let (mut instrument, fallback) = (loaded.instrument, loaded.fallback);
         let mut report = vec![Section {
             label: "plugin",
-            considered: plugins,
+            considered: loaded.considered,
             detail,
-            short: plugin.name().to_string(),
+            short: instrument.name().to_string(),
             hint: "choose another with `onezan play NAME` (see `onezan list`)",
         }];
         let (midi_tx, midi_rx) = midi_queue();
@@ -173,13 +170,13 @@ impl Session {
         let metro = Arc::clone(&metronome);
         let (audio, chosen_output) = match (&opts.output, &opts.remembered.output) {
             (Some(o), _) => (
-                AudioOut::start(&mut plugin, inputs, timing, metro, Some(o))?,
+                AudioOut::start(&mut instrument, inputs, timing, metro, Some(o))?,
                 Some(o.clone()),
             ),
             (None, Some(last)) => {
                 // The queues went into the first attempt: a new one for the keyboard (only the
                 // window remembers an output, and it has no other sources).
-                match AudioOut::start(&mut plugin, inputs, timing, metro, Some(last)) {
+                match AudioOut::start(&mut instrument, inputs, timing, metro, Some(last)) {
                     Ok(a) => (a, Some(last.clone())),
                     Err(e) => {
                         log::warn!("the audio output chosen last time: {e:#}");
@@ -188,12 +185,12 @@ impl Session {
                         let (s, screen_rx) = midi_queue();
                         screen = s;
                         let inputs = vec![rx, screen_rx];
-                        let a = AudioOut::start(&mut plugin, inputs, timing, Arc::clone(&metronome), None)?;
+                        let a = AudioOut::start(&mut instrument, inputs, timing, Arc::clone(&metronome), None)?;
                         (a, None)
                     }
                 }
             }
-            (None, None) => (AudioOut::start(&mut plugin, inputs, timing, metro, None)?, None),
+            (None, None) => (AudioOut::start(&mut instrument, inputs, timing, metro, None)?, None),
         };
         report.extend(audio_sections(&audio));
         Ok(Self {
@@ -203,7 +200,8 @@ impl Session {
             chosen_midi: opts.midi.clone(),
             screen,
             metronome,
-            plugin,
+            instrument,
+            fallback,
             report,
             first_midi,
         })
@@ -214,8 +212,13 @@ impl Session {
         &self.metronome
     }
 
-    pub const fn plugin(&self) -> &Plugin {
-        &self.plugin
+    pub const fn instrument(&self) -> &Instrument {
+        &self.instrument
+    }
+
+    /// Whether the built-in piano is only standing in, because no plugin could be loaded.
+    pub const fn is_fallback(&self) -> bool {
+        self.fallback
     }
 
     /// The report section called `label`.
@@ -285,23 +288,29 @@ impl Session {
         if let Some(a) = self.audio.take() {
             a.stop();
         }
-        let start = |plugin: &mut Plugin, screen: &mut Producer<TimedEvent>, output: Option<&Output>| {
+        let start = |instrument: &mut Instrument, screen: &mut Producer<TimedEvent>, output: Option<&Output>| {
             let (tx, rx) = midi_queue();
             if let Some(w) = &self.watch {
                 w.set_queue(tx);
             }
             let (s, screen_rx) = midi_queue();
             *screen = s;
-            AudioOut::start(plugin, vec![rx, screen_rx], timing, Arc::clone(&self.metronome), output)
+            AudioOut::start(
+                instrument,
+                vec![rx, screen_rx],
+                timing,
+                Arc::clone(&self.metronome),
+                output,
+            )
         };
-        let result = match start(&mut self.plugin, &mut self.screen, output) {
+        let result = match start(&mut self.instrument, &mut self.screen, output) {
             Ok(a) => {
                 self.audio = Some(a);
                 self.chosen_output = output.cloned();
                 Ok(())
             }
             Err(e) if output.is_some() => {
-                self.audio = Some(start(&mut self.plugin, &mut self.screen, None)?);
+                self.audio = Some(start(&mut self.instrument, &mut self.screen, None)?);
                 self.chosen_output = None;
                 Err(e)
             }
@@ -319,9 +328,11 @@ impl Session {
         }
     }
 
-    /// Saves the instrument's sound for the next start.
+    /// Saves a plugin's sound for the next start (the built-in piano has none).
     pub fn save_sound(&self) {
-        crate::instrument_state::save(&self.plugin);
+        if let Some(p) = self.instrument.plugin() {
+            crate::instrument_state::save(p);
+        }
     }
 
     pub fn stop(mut self) {
@@ -329,7 +340,7 @@ impl Session {
         if let Some(a) = self.audio.take() {
             a.stop();
         }
-        self.plugin.stop();
+        self.instrument.stop();
     }
 }
 

@@ -63,6 +63,8 @@ crates/vst3-host/       onezan-vst3-host: the VST3 host (no devices, no GUI)
   util.rs               conversions (platform enum types, strings, TUIDs)
 crates/engine/          onezan-engine: MIDI in, audio out, timing
   lib.rs                module map, re-exports, MIDI queues (rtrb)
+  instrument.rs         Instrument: a VST3 plugin or the built-in piano (rustysynth, a SoundFont);
+                        Voice, its audio-thread half
   midi_in.rs            choose_midi_port, MidiWatch (opens, reconnects, releases held notes), Keys
                         (held keys with velocity, pedal; for display)
   audio_out.rs          pick_output (JACK, else default), request_low_latency, AudioOut
@@ -75,7 +77,9 @@ crates/engine/          onezan-engine: MIDI in, audio out, timing
 apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | midi |
                         play [PLUGIN] [--midi PORT] [--demo] | render [PLUGIN]
   main.rs               command line, play, render
-  plugins.rs            installed plugins; resolve/load: which plugin an argument picks, and why
+  plugins.rs            installed plugins; resolve/load: which instrument an argument picks, and
+                        why; the built-in piano when no plugin loads
+  piano.rs              the built-in piano, embedded by build.rs (when assets/piano/ has it)
   session.rs            plugin + MIDI watcher + audio started together, with the report sections
   report.rs             the startup report as text
   gui.rs                the window (egui/eframe, OpenGL, our own event loop): editor, status bar,
@@ -91,7 +95,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
                         hands, any octaves; the preview the window shows
-build/                  Linux release build in a container (glibc 2.30+); Windows release zip
+apps/onezan/build.rs    embeds assets/piano/*.sf2 when present (cfg onezan_piano), else warns
+build/                  fetch-piano.sh (the built-in piano into assets/piano/, git-ignored);
+                        Linux release build in a container (glibc 2.30+); Windows release zip
                         (windows-release.sh, cross-built with MinGW)
 README.md, LICENSE (GPL-3.0), .gitignore
 ```
@@ -137,8 +143,8 @@ Commit only when the user asks.
 3. **Windows**: run the app on real Windows (so far only under Wine): audio, MIDI, the editor
    (embedded, see "The plugin editor").
 4. **ASIO on Windows** (next milestone; see "ASIO (planned)" below for what is known).
-5. A built-in sound (`rustysynth` with a bundled piano SoundFont) when no VST3 instrument is
-   installed, so the first start always makes sound.
+5. A built-in sound when no VST3 instrument is installed: done (see "Built-in piano"); check
+   by hand on the host, and the instruments window with the mouse.
 6. Choosing the MIDI port, audio output and timing in the window: done (see "Choosing MIDI,
    audio and timing"); check by hand with the mouse, and on Windows.
 7. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
@@ -613,3 +619,36 @@ root only) and musicandhealth's dominant seventh broken chord (Eb7): different c
 source each, and they disagree on inversions. Not reachable: the RCM and ABRSM books (not
 online), Wheaton College's arpeggio handout and an Ontario open textbook (both refused the
 download).
+
+## Built-in piano (2026-11-25)
+
+So the first start always makes sound. FreePats "Upright Piano KW" (2022-02-21), a Kawai upright,
+SF2, stereo, two velocity layers, CC0 (public domain); played by `rustysynth` 1.3 (pure Rust,
+MIT). The user compared three renders of the same phrase (this one in its small 10 MB version,
+this one, and FreePats' YDP Grand, 118 MB, CC-BY) and chose this one.
+
+- **Embedded, uncompressed** (the user's choice over zstd-compressed, 35 MB, unpacked in 0.2 s):
+  one binary, nothing beside it. `build/fetch-piano.sh` downloads the official archive (checked
+  against a pinned SHA-256), unpacks it (bsdtar or 7z) into `assets/piano/` (git-ignored, with its
+  cc0.txt and readme.txt); `apps/onezan/build.rs` then embeds it with `include_bytes!` (cfg
+  `onezan_piano`). Without it the program builds with a warning and has no built-in piano. Both
+  release scripts fetch it first. Sizes: Windows exe 20 to 77 MB, zip 8 to 51 MB; Linux release
+  binary 77 MB. Parsed the first time it is used (57 MB in memory then), once per run.
+- **Engine**: `Instrument` (a `Plugin` or the `Piano`) replaces `Plugin` in `AudioOut::start`,
+  `render_offline` and the session; `Voice` (a plugin `Processor` or a `PianoVoice`) in the
+  callback. The piano renders up to each event's frame, so every event plays on its own sample,
+  like a plugin. Notes, all controllers (sustain) and pitch bend; pressure is ignored. rustysynth's
+  own reverb and chorus are on (its default; the renders the user liked had them).
+- **When it plays**: `play built-in` (or its id `built-in-piano`), the instruments window (listed
+  first), or the remembered choice. And as a stand-in when nothing was asked for and no plugin
+  loads (none installed, or the first one fails): the report says why, the top area says so,
+  and the stand-in is not saved as the choice (`Session::is_fallback`), so a plugin installed
+  later is used. A plugin asked for by name that fails is still an error. No sound is saved for
+  it (no state). `list` shows it.
+- Checked: engine tests (`tests/piano.rs`: a note sounds from its frame, a released note dies
+  away, the pedal holds then releases; skipped without the file); with all plugin folders hidden
+  (`bwrap --tmpfs /usr/lib/vst3 --tmpfs ~/.vst3`): `play --demo` falls back and is heard (system
+  output recorded with `pw-record`), the window shows it, and the settings keep no instrument;
+  `render built-in` on Linux and under Wine (the Windows release exe); the Linux container build;
+  building without the file (warning), and with it again (the folder is watched too, as a file
+  put back keeps its old time). Not checked: by hand on the host, choosing it with the mouse.

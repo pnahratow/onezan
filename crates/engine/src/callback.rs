@@ -1,10 +1,11 @@
 //! The audio callback: drains the MIDI queues, places each event in the block (see
-//! [`crate::timing`]) and runs the plugin. Allocates nothing and takes no locks.
+//! [`crate::timing`]) and runs the instrument. Allocates nothing and takes no locks.
 
+use crate::instrument::Voice;
 use crate::metronome::{Clicker, Metronome};
 use crate::timing::{self, MidiTiming, SharedTiming, TimedEvent};
 use crate::{MAX_CALLBACK_FRAMES, QUEUE_CAP};
-use onezan_vst3_host::{MidiEvent, Processor};
+use onezan_vst3_host::MidiEvent;
 use rtrb::Consumer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -18,7 +19,7 @@ pub struct Report {
 
 /// State owned by the audio callback. Everything is allocated up front.
 pub struct Callback {
-    processor: Processor,
+    voice: Voice,
     inputs: Vec<Consumer<TimedEvent>>,
     /// This callback's events as `(frame, event)`, sorted by frame.
     events: Vec<(usize, MidiEvent)>,
@@ -43,7 +44,7 @@ const SETTLE_CALLBACKS: u32 = 4;
 
 impl Callback {
     pub fn new(
-        processor: Processor,
+        voice: Voice,
         inputs: Vec<Consumer<TimedEvent>>,
         channels: usize,
         rate: u32,
@@ -52,7 +53,7 @@ impl Callback {
         metronome: Arc<Metronome>,
     ) -> Self {
         Self {
-            processor,
+            voice,
             inputs,
             events: Vec::with_capacity(QUEUE_CAP * 2),
             part_events: Vec::with_capacity(QUEUE_CAP * 2),
@@ -111,7 +112,7 @@ impl Callback {
                     .filter(|(at, _)| (start..end).contains(at))
                     .map(|&(at, ev)| (at.saturating_sub(start), ev)),
             );
-            self.processor.process(&self.part_events, l, r);
+            self.voice.process(&self.part_events, l, r);
             self.clicker.render(&self.metronome, l, r);
             start = end;
             for ((frame, &lv), &rv) in chunk.chunks_mut(ch).zip(l.iter()).zip(r.iter()) {
