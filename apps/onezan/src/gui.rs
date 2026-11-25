@@ -149,6 +149,8 @@ struct App {
     mouse_key: Option<u8>,
     /// The sustain pedal as pressed with the mouse (the bar's Pedal light).
     mouse_pedal: MousePedal,
+    /// The metronome's tap tempo.
+    tap: TapTempo,
     preview: Preview,
     /// The last chord played, shown dimmed once the keys are up.
     last_chord: Option<Chord>,
@@ -228,6 +230,7 @@ impl App {
             range: keyboard::DEFAULT_RANGE,
             mouse_key: None,
             mouse_pedal: MousePedal::default(),
+            tap: TapTempo::default(),
             preview: settings
                 .scale
                 .as_deref()
@@ -335,6 +338,7 @@ impl App {
             &mut self.open.instruments,
         );
         let metronome = session.map(|s| Arc::clone(s.metronome()));
+        let tap = &mut self.tap;
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
         egui::Sides::new().shrink_left().truncate().show(
             ui,
@@ -406,7 +410,7 @@ impl App {
                     .on_hover_text("Choose the scale whose fingering the keyboard shows, in a window of its own");
                 if let Some(m) = &metronome {
                     ui.separator();
-                    metronome_controls(ui, m);
+                    metronome_controls(ui, m, tap);
                 }
             },
         );
@@ -911,8 +915,8 @@ const fn pedal_event(down: bool) -> MidiEvent {
     }
 }
 
-/// The metronome's controls, right to left (the bar's right side is laid out that way): the
-/// tempo, then the switch. Its sound and volume are in the options window.
+/// The metronome's controls, right to left (the bar's right side is laid out that way): Tap,
+/// the tempo, then the switch. Its sound and volume are in the options window.
 /// Starts the instrument, keyboard and audio with `opts`; the bar's MIDI state follows the
 /// keyboard. Prints the startup report. The error as text when nothing could be started.
 fn start_session(
@@ -974,7 +978,14 @@ fn apply_metronome(m: &Metronome, s: &MetronomeSettings, tempo: bool) {
     }
 }
 
-fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
+fn metronome_controls(ui: &mut egui::Ui, m: &Metronome, tap: &mut TapTempo) {
+    if ui
+        .button("Tap")
+        .on_hover_text("Tap the tempo: click in time, or press T (a pause of 3 s starts over)")
+        .clicked()
+    {
+        tap_tempo(ui.ctx(), m, tap);
+    }
     let mut bpm = m.bpm();
     let r = ui
         .add(egui::DragValue::new(&mut bpm).range(MIN_BPM..=MAX_BPM).suffix(" BPM"))
@@ -990,6 +1001,52 @@ fn metronome_controls(ui: &mut egui::Ui, m: &Metronome) {
     metronome_icon(ui.painter(), r.rect, colour);
     if r.clicked() {
         m.set_on(!on);
+    }
+}
+
+/// One tap, now: sets the tempo once there are two taps in a row.
+fn tap_tempo(ctx: &egui::Context, m: &Metronome, tap: &mut TapTempo) {
+    if let Some(bpm) = tap.tap(ctx.input(|i| i.time)) {
+        m.set_bpm(bpm);
+    }
+}
+
+/// Tap tempo: the beats per minute of the last few taps.
+#[derive(Debug, Default)]
+struct TapTempo {
+    /// The recent taps, in seconds, oldest first; at most [`TAP_COUNT`].
+    taps: Vec<f64>,
+}
+
+/// How many taps the tempo is averaged over (the intervals between them: one fewer).
+const TAP_COUNT: usize = 5;
+
+/// A pause longer than this starts a new count. Above a beat at [`MIN_BPM`] (3 s).
+const TAP_RESET: f64 = 3.2;
+
+impl TapTempo {
+    /// A tap at `time` (seconds, on any steady clock): the tempo from the taps so far, from the
+    /// second tap of a count on. Clamped to [`MIN_BPM`]..=[`MAX_BPM`].
+    fn tap(&mut self, time: f64) -> Option<u32> {
+        if self
+            .taps
+            .last()
+            .is_some_and(|&last| !(0.0..=TAP_RESET).contains(&(time - last)))
+        {
+            self.taps.clear();
+        }
+        if self.taps.len() == TAP_COUNT {
+            self.taps.remove(0);
+        }
+        self.taps.push(time);
+        let (first, last) = (*self.taps.first()?, *self.taps.last()?);
+        let intervals = u32::try_from(self.taps.len().saturating_sub(1))
+            .ok()
+            .filter(|&n| n > 0)?;
+        let beat = (last - first) / f64::from(intervals);
+        let bpm = (60.0 / beat).round().clamp(f64::from(MIN_BPM), f64::from(MAX_BPM));
+        // Clamped to a range u32 holds, so the conversion is exact.
+        (MIN_BPM..=MAX_BPM).find(|&b| f64::from(b) >= bpm)
     }
 }
 
@@ -1378,6 +1435,14 @@ impl eframe::App for App {
             m.set_on(!m.is_on());
             ctx.request_repaint();
         }
+        // T taps the tempo, likewise.
+        if ctx.input(|i| i.key_pressed(egui::Key::T))
+            && !ctx.egui_wants_keyboard_input()
+            && let Some(m) = self.session.as_ref().map(Session::metronome)
+        {
+            tap_tempo(ctx, m, &mut self.tap);
+            ctx.request_repaint();
+        }
         self.keep_settings(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             // The editor goes while its window is still there.
@@ -1467,6 +1532,31 @@ fn to_u16(n: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_tempo_averages_the_last_taps_and_starts_over_after_a_pause() {
+        let mut t = TapTempo::default();
+        assert_eq!(t.tap(10.0), None, "one tap is no tempo yet");
+        assert_eq!(t.tap(10.5), Some(120));
+        assert_eq!(t.tap(11.0), Some(120));
+        // Uneven taps: the average beat, (11.7 - 10.0) / 3 = 0.567 s.
+        assert_eq!(t.tap(11.7), Some(106));
+        assert_eq!(t.tap(12.1), Some(114), "(12.1 - 10.0) / 4 = 0.525 s");
+        // Only the last TAP_COUNT taps count: the oldest drop out.
+        assert_eq!(t.tap(12.5), Some(120), "(12.5 - 10.5) / 4 = 0.5 s");
+        assert_eq!(t.tap(12.9), Some(126), "(12.9 - 11.0) / 4 = 0.475 s");
+        assert_eq!(t.tap(13.3), Some(150), "(13.3 - 11.7) / 4 = 0.4 s");
+        // A long pause: a new count, so no tempo from the first tap after it.
+        assert_eq!(t.tap(20.0), None);
+        assert_eq!(t.tap(21.0), Some(60));
+        // Clamped to the metronome's range.
+        let mut fast = TapTempo::default();
+        fast.tap(0.0);
+        assert_eq!(fast.tap(0.05), Some(MAX_BPM));
+        let mut slow = TapTempo::default();
+        slow.tap(0.0);
+        assert_eq!(slow.tap(3.1), Some(MIN_BPM), "19.4 BPM");
+    }
 
     #[test]
     fn the_mouse_pedal_toggles_and_lets_go_with_the_real_pedal() {

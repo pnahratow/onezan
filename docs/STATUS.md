@@ -328,7 +328,9 @@ about 0.2 s so it fits 300 BPM).
 - `Metronome` (shared, atomics): on/off, BPM (20 to 300), volume (0 to 1, linear; default 0.6),
   sound, and `play_sample()` (one click now, metronome on or off, to try a sound).
 - Window: in the status bar's right part, a metronome button (a drawn metronome icon, highlighted while it runs) and a BPM field (drag, scroll or
-  type). Volume and sound are in the options window; changing either plays a sample click. Space starts and stops it. On purpose nothing more: the user wants no beats per bar,
+  type). Volume and sound are in the options window; changing either plays a sample click. Space starts and stops it. A Tap button (or T) sets the
+  tempo from the average of the last 5 taps; a pause over 3.2 s starts a new count; the beat
+  is not moved onto the taps (`TapTempo`; not checked with the mouse yet). On purpose nothing more: the user wants no beats per bar,
   accents or beat LEDs (an earlier version had them).
 - `onezan play --metronome BPM` and `onezan gui --metronome BPM` start it at that tempo.
 - Checked: unit tests (beats on their sample for blocks of 64 to 4096 frames, no drift at 70
