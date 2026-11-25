@@ -24,7 +24,7 @@ mod report;
 mod session;
 mod settings;
 
-use plugins::{installed, load};
+use plugins::{Installed, choose, installed};
 use report::{midi_change, print_report, print_section};
 use session::{Options, Remembered, Session};
 
@@ -246,7 +246,7 @@ fn play_scale(mut tx: onezan_engine::Producer<TimedEvent>) {
 }
 
 fn render(plugin_arg: Option<&str>, sample_rate: u32) -> Result<()> {
-    let loaded = load(plugin_arg)?;
+    let loaded = choose(&mut Installed, plugin_arg, None)?;
     let mut instrument = loaded.instrument;
     print_section("plugin", &loaded.considered, "", "");
     // A quarter second per note, sounding for 90% of it; two silent notes' worth at the end.

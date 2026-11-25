@@ -1,0 +1,19 @@
+{
+  "metronome": {
+    "bpm": 90,
+    "volume": 0.5,
+    "sound": "Woodblock"
+  },
+  "scale": "D major",
+  "window": [
+    1200.0,
+    760.0
+  ],
+  "instrument": "built-in-piano",
+  "midi": "SWISSONIC EasyKeys49:SWISSONIC EasyKeys49 MIDI 1",
+  "audio": {
+    "backend": "JACK",
+    "device": "default"
+  },
+  "midi_timing": "exact"
+}

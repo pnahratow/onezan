@@ -93,9 +93,11 @@ const KINDS: [Kind; 20] = [
 ];
 
 impl Kind {
-    /// Whether it may be played without its fifth: sevenths and ninths with a perfect fifth.
+    /// Whether it may be played without its fifth: sevenths and ninths with a perfect fifth (not
+    /// sixths or added notes: Eb G C is C minor over Eb, not Eb6 without its fifth).
     fn fifth_optional(&self) -> bool {
-        self.tones.len() >= 4 && self.tones.contains(&P5) && !self.symbol.contains("sus")
+        let seventh = self.tones.contains(&MIN7) || self.tones.contains(&MAJ7);
+        seventh && self.tones.contains(&P5) && !self.symbol.contains("sus")
     }
 
     /// Spelled from a minor third (C#m rather than Dbm, as minor keys are).
@@ -417,6 +419,9 @@ mod tests {
         assert_eq!(chord(&keys("E G C")).name, "C major, first inversion");
         assert_eq!(chord(&keys("G C E")).name, "C major, second inversion");
         assert_eq!(symbol(&keys("A C E")), "Am");
+        // Minor first inversions are not sixth chords without their fifth.
+        assert_eq!(symbol(&keys("C E A")), "Am/C");
+        assert_eq!(symbol(&keys("Eb G C")), "Cm/Eb");
         assert_eq!(symbol(&keys("B D F")), "Bdim");
         assert_eq!(symbol(&keys("C E G#")), "Caug");
         assert_eq!(symbol(&keys("C F G")), "Csus4");
@@ -455,6 +460,71 @@ mod tests {
         assert_eq!(symbol(&keys("G C D")), "Gsus4");
         assert_eq!(symbol(&keys("C Eb Gb A")), "Cdim7");
         assert_eq!(symbol(&keys("Eb Gb A C")), "Ebdim7");
+    }
+
+    /// `kind` on `root` (a pitch class) in close position, from its `inversion`-th tone up.
+    fn voiced(root: u8, kind: &Kind, inversion: usize) -> Vec<u8> {
+        let n = kind.tones.len();
+        let mut keys: Vec<u8> = Vec::new();
+        for (semis, _) in kind.tones.iter().cycle().skip(inversion).take(n) {
+            let mut key = 48 + root + semis;
+            while keys.last().is_some_and(|&l| key <= l) {
+                key += 12;
+            }
+            keys.push(key);
+        }
+        keys
+    }
+
+    fn root_name(root: u8, kind: &Kind) -> String {
+        root_spelling(root, kind.minorish()).1
+    }
+
+    #[test]
+    fn every_chord_in_root_position_is_named_as_itself() {
+        for root in 0..12 {
+            for kind in &KINDS {
+                let c = chord(&voiced(root, kind, 0));
+                assert_eq!(c.symbol, format!("{}{}", root_name(root, kind), kind.symbol));
+                assert!(!c.name.contains(','), "{}: {}", c.symbol, c.name);
+            }
+        }
+    }
+
+    #[test]
+    fn inversions_of_triads_and_sevenths_name_the_chord_over_its_bass() {
+        let ordinal = ["", "first inversion", "second inversion", "third inversion"];
+        for root in 0..12 {
+            for kind in KINDS.iter().filter(|k| ["", "m", "7", "maj7"].contains(&k.symbol)) {
+                for (inv, ordinal) in ordinal.iter().enumerate().take(kind.tones.len()).skip(1) {
+                    let c = chord(&voiced(root, kind, inv));
+                    let bass = c.notes.split_whitespace().next().unwrap().to_owned();
+                    assert_eq!(c.symbol, format!("{}{}/{bass}", root_name(root, kind), kind.symbol));
+                    assert!(c.name.ends_with(ordinal), "{}: {}", c.symbol, c.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_inversion_reads_as_some_chord_over_its_bass() {
+        // Some inversions are other chords by the bass rule (Am7/C is C6): only consistency.
+        for root in 0..12 {
+            for kind in &KINDS {
+                for inv in 0..kind.tones.len() {
+                    let keys = voiced(root, kind, inv);
+                    let c = chord(&keys);
+                    assert_eq!(c.notes.split_whitespace().count(), keys.len(), "{}", c.symbol);
+                    let bass = c.notes.split_whitespace().next().unwrap();
+                    if let Some((_, over)) = c.symbol.split_once('/') {
+                        assert_eq!(over, bass, "{}", c.symbol);
+                        assert!(c.name.contains(','), "{}: {}", c.symbol, c.name);
+                    } else {
+                        assert!(c.symbol.starts_with(bass), "{} over {bass}", c.symbol);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

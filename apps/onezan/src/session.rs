@@ -1,12 +1,12 @@
 //! A running instrument: the plugin or built-in piano, the MIDI keyboard and the audio output,
 //! as `play` and the window both use them.
 
-use crate::plugins::{Loaded, load};
+use crate::plugins::{Chosen, Installed, choose};
 use anyhow::Result;
 use onezan_engine::midi_in::POLL;
 use onezan_engine::{
     AudioOut, Considered, Consumer, Instrument, Keys, Metronome, MidiChange, MidiTiming, MidiWatch, Output, Producer,
-    TimedEvent, Verdict, choose_midi_port, midi_queue,
+    TimedEvent, choose_midi_port, midi_queue,
 };
 use onezan_vst3_host::MidiEvent;
 use std::sync::Arc;
@@ -56,26 +56,13 @@ pub fn port_name(port: &str) -> &str {
 
 /// Loads the instrument asked for; else the one used last time; else (or when that fails) the
 /// automatic choice (see [`load`]). Then a plugin's sound from last time.
-fn load_instrument(opts: &Options) -> Result<(Loaded, String)> {
-    let (mut loaded, note) = match (&opts.plugin, &opts.remembered.plugin) {
-        (Some(asked), _) => (load(Some(asked))?, String::new()),
-        (None, Some(last)) => match load(Some(last)) {
-            Ok(mut l) => {
-                for c in &mut l.considered {
-                    c.why = match c.verdict {
-                        Verdict::Used => "the instrument used last time".into(),
-                        _ => "not the one used last time".into(),
-                    };
-                }
-                (l, String::new())
-            }
-            Err(e) => {
-                log::warn!("the instrument used last time: {e:#}");
-                (load(None)?, "the one used last time failed to load".to_string())
-            }
-        },
-        (None, None) => (load(None)?, String::new()),
-    };
+fn load_instrument(opts: &Options) -> Result<(Chosen<Instrument>, String)> {
+    let mut loaded = choose(
+        &mut Installed,
+        opts.plugin.as_deref(),
+        opts.remembered.plugin.as_deref(),
+    )?;
+    let note = std::mem::take(&mut loaded.note);
     let sound = loaded
         .instrument
         .plugin_mut()

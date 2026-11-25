@@ -8,7 +8,7 @@
 use crate::chords::{self, Chord, Reading};
 use crate::embed::{Embedded, PixelRect};
 use crate::fingering::Hand;
-use crate::fingering::{Preview, Scale};
+use crate::fingering::{Preview, Scale, Shown};
 use crate::keyboard::{self, KeyLook};
 use crate::progress::{Practice, Recorder};
 use crate::session::{Options, Remembered, Section, Session, port_name};
@@ -708,33 +708,12 @@ impl App {
         let shown = self.preview.shown();
         let range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
         let (keys, mouse) = (&self.keys, self.mouse_key);
-        // A chord held gets its fingering on its keys, in place of the scale's there.
-        let held_keys = self.held_keys();
-        let chord_fingers = if matches!(chords::read(&held_keys), Some(Reading::Chord(_))) {
-            chords::fingering(&held_keys)
-        } else {
-            Vec::new()
-        };
+        let looks = KeyLooks::new(&shown, &self.held_keys());
         let held = keyboard::show(ui, range, |key| {
-            let mut fingers = chord_fingers.iter().filter(|&&(k, _, _)| k == key).peekable();
-            let chord = fingers.peek().is_some();
-            let (left, right) = if chord {
-                fingers.fold((None, None), |(l, r), &(_, hand, finger)| match hand {
-                    Hand::Left => (Some(finger), r),
-                    Hand::Right => (l, Some(finger)),
-                })
-            } else {
-                shown.fingers(key)
-            };
-            KeyLook {
-                velocity: keys
-                    .velocity(key)
-                    .or_else(|| (mouse == Some(key)).then_some(MOUSE_VELOCITY)),
-                in_scale: shown.in_scale(key),
-                left,
-                right,
-                chord,
-            }
+            let velocity = keys
+                .velocity(key)
+                .or_else(|| (mouse == Some(key)).then_some(MOUSE_VELOCITY));
+            looks.look(key, velocity)
         });
         self.play_mouse(held);
     }
@@ -799,6 +778,46 @@ impl App {
             }
         }
         self.mouse_key = held;
+    }
+}
+
+/// What the keyboard shows on each key: the scale shown, and over it the chord held.
+struct KeyLooks<'a> {
+    scale: &'a Shown,
+    /// The held chord's fingering (empty when the keys make no chord, or nothing is agreed).
+    chord: Vec<(u8, Hand, u8)>,
+}
+
+impl<'a> KeyLooks<'a> {
+    fn new(scale: &'a Shown, held: &[u8]) -> Self {
+        let chord = if matches!(chords::read(held), Some(Reading::Chord(_))) {
+            chords::fingering(held)
+        } else {
+            Vec::new()
+        };
+        Self { scale, chord }
+    }
+
+    /// `key`, struck with `velocity` (`None`: up). A key with a chord finger shows the chord's
+    /// fingers (outlined) in place of the scale's; every other key shows the scale's.
+    fn look(&self, key: u8, velocity: Option<u8>) -> KeyLook {
+        let mut fingers = self.chord.iter().filter(|&&(k, _, _)| k == key).peekable();
+        let chord = fingers.peek().is_some();
+        let (left, right) = if chord {
+            fingers.fold((None, None), |(l, r), &(_, hand, finger)| match hand {
+                Hand::Left => (Some(finger), r),
+                Hand::Right => (l, Some(finger)),
+            })
+        } else {
+            self.scale.fingers(key)
+        };
+        KeyLook {
+            velocity,
+            in_scale: self.scale.in_scale(key),
+            left,
+            right,
+            chord,
+        }
     }
 }
 
@@ -1318,6 +1337,59 @@ fn to_u16(n: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn c_major() -> Shown {
+        Preview::from_name("C major").unwrap().shown()
+    }
+
+    #[test]
+    fn keys_show_the_scale_when_no_chord_is_held() {
+        let scale = c_major();
+        let looks = KeyLooks::new(&scale, &[]);
+        let c = looks.look(60, None);
+        assert!(c.in_scale && !c.chord);
+        assert_eq!((c.left, c.right), scale.fingers(60));
+        assert_ne!((c.left, c.right), (None, None), "C4 has a finger in C major");
+        let c_sharp = looks.look(61, None);
+        assert!(!c_sharp.in_scale && (c_sharp.left, c_sharp.right) == (None, None));
+    }
+
+    #[test]
+    fn a_held_chord_shows_its_fingering_on_its_keys_only() {
+        let scale = c_major();
+        let looks = KeyLooks::new(&scale, &[60, 64, 67]);
+        // C E G in root position: both hands are agreed.
+        for (key, left, right) in [(60, 5, 1), (64, 3, 3), (67, 1, 5)] {
+            let l = looks.look(key, Some(100));
+            assert!(l.chord, "key {key}");
+            assert_eq!((l.left, l.right), (Some(left), Some(right)), "key {key}");
+        }
+        // D, not held: the scale's fingers, filled.
+        let d = looks.look(62, None);
+        assert!(!d.chord);
+        assert_eq!((d.left, d.right), scale.fingers(62));
+    }
+
+    #[test]
+    fn a_chord_agreed_for_one_hand_hides_the_scales_other_hand_on_its_keys() {
+        let scale = c_major();
+        assert!(scale.fingers(72).1.is_some(), "C5 has a right-hand finger in the scale");
+        // G C E, second inversion: only the left hand's 5 2 1 is agreed.
+        let looks = KeyLooks::new(&scale, &[67, 72, 76]);
+        let c5 = looks.look(72, Some(100));
+        assert!(c5.chord);
+        assert_eq!((c5.left, c5.right), (Some(2), None));
+    }
+
+    #[test]
+    fn held_keys_that_make_no_chord_keep_the_scale() {
+        let scale = c_major();
+        let looks = KeyLooks::new(&scale, &[60, 62]);
+        let c = looks.look(60, Some(90));
+        assert!(!c.chord);
+        assert_eq!((c.left, c.right), scale.fingers(60));
+        assert_eq!(c.velocity, Some(90));
+    }
 
     #[test]
     fn times_read_naturally() {

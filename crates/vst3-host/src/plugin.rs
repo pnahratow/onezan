@@ -753,6 +753,15 @@ fn copy_or_silence(dst: &mut [f32], src: Option<&Vec<f32>>) {
 mod state_tests {
     use super::State;
 
+    /// The file format onezan 0.1 saves instrument sounds in (`<class id>.state`): sounds saved
+    /// then must keep loading. A new layout gets a new marker and keeps reading this one.
+    #[test]
+    fn a_state_file_from_version_0_1_still_loads() {
+        let s = State::from_bytes(include_bytes!("../fixtures/state-OZVST3S1.bin")).unwrap();
+        assert_eq!(s.component, b"<patch name=\"Init Saw\"/>");
+        assert_eq!(s.controller, b"controller state");
+    }
+
     #[test]
     fn state_bytes_round_trip_and_reject_damage() {
         let s = State {

@@ -79,7 +79,8 @@ tests would be brittle or impossible. STATUS.md lists what was checked by hand a
 
 ## Order of work
 
-Each step is small, stands on its own, and changes no behaviour.
+Each step is small, stands on its own, and changes no behaviour. Steps 1 to 7 were done on
+2026-11-25 (below, what each became); the tables above still mark the rest as new.
 
 1. **Shared instrument suite**: merge the plugin and piano checks into one set of contract
    tests, run on the piano (always, when the SoundFont is there) and on a plugin (when installed).
@@ -93,6 +94,25 @@ Each step is small, stands on its own, and changes no behaviour.
 6. **Chord naming round trip** over all roots, types and inversions.
 7. **One check command**, `build/check.sh`: format, clippy for Linux and Windows, tests on Linux
    and under Wine; what to run before a commit. (No CI yet; this is the same thing by hand.)
+
+What they became:
+
+1. `crates/engine/tests/common/mod.rs`: `instrument_contract!(make)` writes five tests (a note
+   starts at its own frame, a released note dies away, the pedal holds, a ten-note chord sounds
+   and stops, an event at a block's end is not lost); `tests/piano.rs` and `tests/plugin.rs` use
+   it. Checked by breaking the piano's timing on purpose: the frame test failed.
+2. `callback::Render` (implemented by `Voice`); eight tests in `callback.rs` with a recording
+   fake: order, every source, a flood delayed not lost, exact timing inside the block, a
+   callback split in parts (checked by breaking the part offsets on purpose), mono, stereo and
+   four channels, the metronome, the block size report.
+3. `plugins::choose` over a `Source` (`Installed` for real); five table tests with a fake source.
+4. `apps/onezan/fixtures/` (settings, practice history, with a README) and
+   `crates/vst3-host/fixtures/` (an instrument sound); one test each reads them.
+5. `KeyLooks` in `gui.rs`; four tests (scale alone, chord over it, one hand agreed, no chord).
+6. Three tests over all 12 roots × 20 chord types × every inversion. They found a bug: a minor
+   triad in first inversion was named as a sixth chord without its fifth (Cm/Eb read as Eb6).
+   Only sevenths and ninths may now drop their fifth.
+7. `build/check.sh` (`--quick`: Linux only).
 
 ## Writing a new test
 

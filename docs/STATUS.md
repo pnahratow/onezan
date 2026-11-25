@@ -652,3 +652,10 @@ this one, and FreePats' YDP Grand, 118 MB, CC-BY) and chose this one.
   `render built-in` on Linux and under Wine (the Windows release exe); the Linux container build;
   building without the file (warning), and with it again (the folder is watched too, as a file
   put back keeps its old time). Not checked: by hand on the host, choosing it with the mouse.
+
+## Testing (2026-11-25)
+
+`docs/TESTING.md`: the plan (contracts between modules, not insides) and what was done. Run
+`build/check.sh` before a commit: format, clippy and tests for Linux and, under Wine, Windows
+(`--quick`: Linux only). Saved-file fixtures in `apps/onezan/fixtures/` and
+`crates/vst3-host/fixtures/` must keep loading. 97 tests on Linux at this point.

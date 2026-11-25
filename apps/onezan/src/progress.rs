@@ -294,6 +294,53 @@ mod tests {
         assert!(Path::new(&aside).exists());
     }
 
+    const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/progress-0.1.sqlite");
+
+    /// Writes `fixtures/progress-0.1.sqlite`. Run with `--ignored` only to make the fixture of
+    /// a new version (under a new name): the old one must keep loading.
+    #[test]
+    #[ignore = "makes a fixture; not a check"]
+    fn write_fixture() {
+        let _ = std::fs::remove_file(FIXTURE);
+        let conn = open_checked(Path::new(FIXTURE)).unwrap();
+        // C major: three notes over 1.5 s; G major: one note; one note with no scale.
+        let notes = [
+            (1_700_000_000_000, 60, 90, Some("C major")),
+            (1_700_000_000_500, 62, 90, Some("C major")),
+            (1_700_000_000_600, 62, 0, Some("C major")),
+            (1_700_000_001_500, 64, 90, Some("C major")),
+            (1_700_000_100_000, 67, 80, Some("G major")),
+            (1_700_000_200_000, 69, 80, None),
+        ];
+        let batch: Vec<_> = notes
+            .iter()
+            .map(|&(t, k, v, s)| (t, k, v, s.map(str::to_owned)))
+            .collect();
+        write(&conn, &batch).unwrap();
+        // One file, no write-ahead log beside it.
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    }
+
+    #[test]
+    fn a_practice_history_from_version_0_1_still_loads() {
+        let path = temp("fixture");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::copy(FIXTURE, &path).unwrap();
+        let p = practice(&path);
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!(p["C major"].time, Duration::from_millis(1500));
+        assert_eq!(p["C major"].last_ms, Some(1_700_000_001_500));
+        assert_eq!(p["G major"].last_ms, Some(1_700_000_100_000));
+        // And recording goes on in it: not moved aside, the old notes kept.
+        let rec = Recorder::start(&path).unwrap();
+        rec.set_scale(Some("C major".into()));
+        rec.note_sink()(72, 90);
+        drop(rec);
+        let conn = Connection::open(&path).unwrap();
+        let n: i64 = conn.query_row("SELECT count(*) FROM notes", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 7);
+    }
+
     #[test]
     fn no_file_means_no_practice() {
         assert!(practice(&temp("none")).is_empty());

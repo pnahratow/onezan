@@ -213,6 +213,25 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_file_from_version_0_1_still_loads() {
+        let path = temp("fixture");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, include_str!("../fixtures/settings-0.1.json")).unwrap();
+        let (_, s) = Store::load(&path);
+        let expected = Settings {
+            instrument: Some("built-in-piano".into()),
+            midi: Some("SWISSONIC EasyKeys49:SWISSONIC EasyKeys49 MIDI 1".into()),
+            audio: Some(AudioSetting {
+                backend: "JACK".into(),
+                device: "default".into(),
+            }),
+            ..sample()
+        };
+        assert_eq!(s, expected);
+        assert!(path.exists(), "the file was moved aside");
+    }
+
+    #[test]
     fn folders_follow_the_platform() {
         let (config, data) = (config_dir().unwrap(), data_dir().unwrap());
         assert!(config.ends_with("onezan") && data.ends_with("onezan"));
