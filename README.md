@@ -87,8 +87,8 @@ See [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Credits and licence
 
-Copyright © 2026 Philipp Nahratow. onezan is licensed under the GNU General Public License,
-version 3 or later. See `LICENSE`.
+onezan is free software, licensed under the GNU General Public License, version 3 or (at your
+option) any later version (GPL-3.0-or-later). See `LICENSE` for the full text.
 
 - **Built-in piano:** [FreePats](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html)'
   "Upright Piano KW", a Kawai upright recorded by Gonzalo and Roberto in 2017, released under
