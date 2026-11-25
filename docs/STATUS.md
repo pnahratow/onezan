@@ -1,6 +1,6 @@
 # onezan: status and handoff
 
-Last updated: 2026-11-25. Read this first when resuming.
+Last updated: 2026-11-25 (after the clef column). Read this first when resuming.
 
 ## What onezan is
 
@@ -130,29 +130,31 @@ Commit only when the user asks.
 - The octave button on a held note: set aside by the user for now.
 - Exact MIDI timing has only been checked offline and by the report; no system here gives short
   enough blocks to hear it (it is picked at 11 ms or less).
-- Real Windows: so far only under Wine (tests, plugin loading and processing with Surge XT, the
-  embedded editor; see "Windows checks under Wine"). Audio devices, MIDI and latency are unchecked.
+- Real Windows: checked by the user up to the tap tempo (see "Checked by hand"); the clef
+  column in the scales window (Bravura) is not yet checked there.
 - Under Wine, after the window grows, a strip at its right edge can stay unpainted until the
-  next repaint (seen once, growing a floating window; shrinking is fine; does not happen without
-  an embedded editor). Probably Wine's OpenGL with child windows; check on real Windows.
+  next repaint (seen once, growing a floating window). Not seen on real Windows.
+
+## Checked by hand (2026-11-25)
+
+By the user, on the Linux host and on real Windows, everything up to the tap tempo (`376234f`):
+settings and what is saved between starts, the instrument's sound, the practice history, the
+scales and instruments windows with the mouse, choosing MIDI, audio and timing in the window,
+the built-in piano, chords, the pedal light and tap tempo. Windows: audio, MIDI and the
+embedded editor. The user considers this state good for a v1 tag.
 
 ## Next steps, in order
 
-1. **Check by hand on the host**: settings, the instrument's sound and the practice history
-   (all checked here in the VM, see "Saved between starts"); the scales window with the mouse.
-2. **Scale trainer basics**: hands separately and contrary motion, choosing octaves, showing the way down
-   (melodic minor differs), the learning order (`fingering::LEARNING_ORDER`). The table is done
-   (see "Fingering table" below).
-3. **Windows**: run the app on real Windows (so far only under Wine): audio, MIDI, the editor
-   (embedded, see "The plugin editor").
-4. **ASIO on Windows** (next milestone; see "ASIO (planned)" below for what is known).
-5. A built-in sound when no VST3 instrument is installed: done (see "Built-in piano"); check
-   by hand on the host, and the instruments window with the mouse.
-6. Choosing the MIDI port, audio output and timing in the window: done (see "Choosing MIDI,
-   audio and timing"); check by hand with the mouse, and on Windows.
-7. Smaller, when convenient: compare `--midi-timing` modes by ear on the host; keyboard focus
-   in the embedded editor; sharpness under fractional scaling (XWayland).
-8. Later: CLAP via `clack-host`.
+1. **v1**: final touch-ups, check the clef column on Windows, version 1.0.0, tag.
+2. **Scale trainer basics**: hands separately and contrary motion, choosing octaves, showing the
+   way down (melodic minor differs), the learning order (`fingering::LEARNING_ORDER`) as a path.
+   The table is done (see "Fingering table" below).
+3. **Notation**: a grand staff with the shown scale and its fingering (`staff.rs` has the clef
+   and key signature; notes need spelling per degree, `chords.rs` has `spell`).
+4. **ASIO on Windows** (see "ASIO (planned)" below for what is known).
+5. Smaller, when convenient: compare `--midi-timing` modes by ear; keyboard focus in the
+   embedded editor; sharpness under fractional scaling (XWayland).
+6. Later: CLAP via `clack-host`.
 
 ## Known gaps and shortcuts in the current code
 
@@ -246,7 +248,7 @@ works on any GL driver (the VM has only llvmpipe).
   hover report), MIDI port (green dot when connected; "plug in a keyboard" otherwise;
   live), a pedal LED (amber while sustain is down; always there, so nothing moves; a click
   latches the pedal down, the next click or a release of the real pedal lets go: `MousePedal`,
-  sent on channel 0 like the mouse's notes, not checked with the mouse yet), audio
+  sent on channel 0 like the mouse's notes), audio
   backend and block length, timing mode. Hovering an
   item shows the startup report for it (what was chosen, why, the alternatives). On the right,
   the fingering picker. When the window is narrow the left part is cut off, not overlapped.
@@ -333,13 +335,13 @@ about 0.2 s so it fits 300 BPM).
 - Window: in the status bar's right part, a metronome button (a drawn metronome icon, highlighted while it runs) and a BPM field (drag, scroll or
   type). Volume and sound are in the options window; changing either plays a sample click. Space starts and stops it. A Tap button (or T) sets the
   tempo from the average of the last 5 taps; a pause over 3.2 s starts a new count; the beat
-  is not moved onto the taps (`TapTempo`; not checked with the mouse yet). On purpose nothing more: the user wants no beats per bar,
+  is not moved onto the taps (`TapTempo`). On purpose nothing more: the user wants no beats per bar,
   accents or beat LEDs (an earlier version had them).
 - `onezan play --metronome BPM` and `onezan gui --metronome BPM` start it at that tempo.
 - Checked: unit tests (beats on their sample for blocks of 64 to 4096 frames, no drift at 70
   BPM, off/on), and recordings of the system output: clicks exactly 500.0 ms apart at 120 BPM
   and 666.7 ms at 90, all the same level. A unit test checks the volume scales the click.
-- Not yet: tempo and volume are not saved between starts.
+- Tempo, click volume and sound are saved between starts (see "Saved between starts").
 
 ## Lints (2026-11-23)
 
@@ -466,7 +468,7 @@ window says why in red. The window keeps its size (the new editor is fitted into
 **Favorites.** Each row has a star (☆/★). Starred instruments (the built-in piano too) are listed
 first, under "Favorites", then "All instruments" with the rest. The class ids are kept in
 settings.json as `favorite_instruments`, in the order starred; a starred plugin that is uninstalled is simply
-not listed (its id stays, so it comes back if reinstalled). Not checked with the mouse yet.
+not listed (its id stays, so it comes back if reinstalled).
 
 Checked in the VM with a throwaway build that switched by itself (no click tool here): a switch
 to Surge XT again (full teardown and restart: sound saved and restored, editor embedded again,
@@ -589,7 +591,7 @@ two stay apart while a scale is shown.
   (where agreed), stacked like the scale badges; wider, they are split at the biggest gap each
   hand can span, the lower part left hand. A lone bass note or an interval gets no badge.
 - Checked in the VM through Midi Through (first version, before the table below): the chord
-  line, the dimmed last chord, badges. Not checked by hand on a real keyboard.
+  line, the dimmed last chord, badges.
 
 ## Chord fingering (2026-11-25)
 
@@ -664,7 +666,7 @@ this one, and FreePats' YDP Grand, 118 MB, CC-BY) and chose this one.
   output recorded with `pw-record`), the window shows it, and the settings keep no instrument;
   `render built-in` on Linux and under Wine (the Windows release exe); the Linux container build;
   building without the file (warning), and with it again (the folder is watched too, as a file
-  put back keeps its old time). Not checked: by hand on the host, choosing it with the mouse.
+  put back keeps its old time).
 
 ## Testing (2026-11-25)
 

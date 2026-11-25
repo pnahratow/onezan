@@ -1,9 +1,17 @@
 # onezan
 
-Play your MIDI keyboard through a real VST3 instrument, on Linux and Windows. Without one, it
-plays its built-in piano.
-The long-term goal is a scale trainer with fingering display, a learning order, a metronome and
-progress tracking. This first milestone is the instrument host it will sit on.
+Practise piano scales with your MIDI keyboard, on Linux and Windows. onezan plays your keyboard
+through a real VST3 instrument, or its built-in piano when there is none, and shows:
+
+- an on-screen keyboard with the keys you hold and how hard you struck them;
+- the fingering for every major and minor scale (natural, harmonic, melodic) in all 12 keys,
+  both hands, with each scale's clef and key signature;
+- the name and a fingering of the chord you hold;
+- a metronome with tap tempo;
+- how long you practised each scale, and when you last played it.
+
+It works without setup: it picks the keyboard, audio output and instrument by itself, and
+remembers your choices.
 
 ## Build
 
@@ -24,8 +32,7 @@ built-in piano. The release scripts below fetch it themselves.
 build/fetch-piano.sh        # -> assets/piano/
 ```
 
-Tested on Linux Mint 22 (the Debian line) and Arch (the Arch line). Windows should need nothing
-beyond Rust (not tried yet).
+Tested on Linux Mint 22 (the Debian line), Arch (the Arch line) and Windows.
 
 A binary runs only on systems whose glibc is at least as new as the one it was built on. For a
 binary that runs on most distributions (glibc 2.30+: Ubuntu 20.04+, Mint 20+, Debian 11+,
@@ -110,7 +117,9 @@ sometimes prefer others. If your teacher gives you a different one, follow your 
 
 ## Not done yet
 
-- The plugin's editor on Windows (HWND), presets.
+- Exercises: hands separately, contrary motion, more octaves, the way down.
+- Loading presets (`.vstpreset`); the instrument's current sound is kept between starts.
+- ASIO on Windows.
 - CLAP hosting (`clack-host`).
 - macOS module loading.
 
