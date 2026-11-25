@@ -1,10 +1,13 @@
 # onezan
 
-**Practise piano scales with your MIDI keyboard.** onezan shows the fingering for every major
+**Practice piano scales with your MIDI keyboard.** onezan shows the fingering for every major
 and minor scale on an on-screen keyboard, plays what you play through a real VST3 instrument
-(or its own piano), and keeps track of how much you practised each scale.
+(or its own piano), and keeps track of how much you practiced each scale.
 
 For Linux and Windows. Free and open source (GPL-3.0-or-later).
+
+![onezan playing through Surge XT: E natural minor's fingering on the keyboard, and an E minor
+chord held, named and fingered](docs/screenshot.png)
 
 ## What it does
 
@@ -16,8 +19,8 @@ For Linux and Windows. Free and open source (GPL-3.0-or-later).
 - **Your sound.** Plays your keyboard through any VST3 instrument you have installed, with its
   own editor in the window. Without one, it uses its built-in piano.
 - **A metronome**, with a tempo you can tap in.
-- **Practice history.** How long you practised each scale, and when you last played it.
-  Star your favourite scales and instruments to keep them at the top.
+- **Practice history.** How long you practiced each scale, and when you last played it.
+  Star your favorite scales and instruments to keep them at the top.
 
 ## It just works
 
@@ -55,6 +58,8 @@ start with is [Surge XT](https://surge-synthesizer.github.io/).
 
 ## Where the fingerings come from
 
+### Scales
+
 onezan shows the standard fingering taught for each scale. It doesn't invent fingerings. Every
 scale was compared with at least two independent published charts:
 [pianoscales.org](https://pianoscales.org/major.html),
@@ -68,24 +73,32 @@ follows the majority. The numbers from these charts are built into onezan's test
 fingerings can't change by accident, and the tests check that every scale can be played up and
 down over one to four octaves with the thumb only on white keys.
 
+### Chords
+
+There is no official fingering for chords: exam boards print broken chords and arpeggios, and
+teachers differ. So onezan shows a chord fingering only where at least two published sources
+give one and none gives another, and shows nothing otherwise. The sources are the Salvation
+Army's music manual ("Piano Chords in Inversions", all 24 keys, both hands),
+[musicandhealth.co.uk](https://musicandhealth.co.uk/)'s key-by-key broken chords,
+[Hoffman Academy's chord inversions](https://www.hoffmanacademy.com/), Piano with Lauren's
+chart, and Yamaha's "Basic piano chords for beginners".
+
+That covers major and minor triads in close position and in each inversion, and the same with
+the bottom note doubled an octave up (C E G C). For example, a right-hand triad in root position
+is 1 3 5 and in first inversion 1 2 5; the left hand plays 5 3 1 in root position and 5 2 1 in
+second inversion.
+Where the sources disagree (the right hand's second inversion, 1 3 5 or 1 2 4, is the best-known
+case), onezan shows no number rather than pick a side. Seventh chords and wider voicings have no
+fingering yet. As with the scales, the sources' numbers are built into the tests.
+
 Many good fingerings exist, and teachers and exam boards sometimes prefer others. If your
 teacher gives you a different one, follow your teacher.
-
-## Coming next
-
-onezan is growing into a full scale trainer:
-
-- exercises: hands separately, contrary motion, more octaves, the way down (melodic minor
-  descends differently);
-- a suggested learning order, from C major to the black-key scales;
-- the scale written out on a grand staff;
-- ASIO on Windows for lower latency.
 
 ## Building from source
 
 See [docs/BUILDING.md](docs/BUILDING.md).
 
-## Credits and licence
+## Credits and license
 
 onezan is free software, licensed under the GNU General Public License, version 3 or (at your
 option) any later version (GPL-3.0-or-later). See `LICENSE` for the full text.
