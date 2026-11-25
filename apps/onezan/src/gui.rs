@@ -5,7 +5,9 @@
 //! the keyboard. On Linux that needs X11, so the
 //! window runs on X11 (XWayland under a Wayland desktop).
 
+use crate::chords::{self, Chord, Reading};
 use crate::embed::{Embedded, PixelRect};
+use crate::fingering::Hand;
 use crate::fingering::{Preview, Scale};
 use crate::keyboard::{self, KeyLook};
 use crate::progress::{Practice, Recorder};
@@ -146,6 +148,8 @@ struct App {
     /// The key held down with the mouse on the on-screen keyboard.
     mouse_key: Option<u8>,
     preview: Preview,
+    /// The last chord played, shown dimmed once the keys are up.
+    last_chord: Option<Chord>,
     /// Which of the windows of their own are open.
     open: OpenWindows,
     /// The installed instruments, scanned when that window first opens (and on "Rescan").
@@ -222,6 +226,7 @@ impl App {
                 .as_deref()
                 .and_then(Preview::from_name)
                 .unwrap_or_default(),
+            last_chord: None,
             open: OpenWindows::default(),
             instruments: None,
             instrument_note: None,
@@ -672,8 +677,23 @@ impl App {
         let shown = self.preview.shown();
         let range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
         let (keys, mouse) = (&self.keys, self.mouse_key);
+        // A chord held gets its fingering on its keys, in place of the scale's there.
+        let held_keys = self.held_keys();
+        let chord_fingers = if matches!(chords::read(&held_keys), Some(Reading::Chord(_))) {
+            chords::fingering(&held_keys)
+        } else {
+            Vec::new()
+        };
         let held = keyboard::show(ui, range, |key| {
-            let (left, right) = shown.fingers(key);
+            let mut fingers = chord_fingers.iter().filter(|&&(k, _, _)| k == key).peekable();
+            let (left, right) = if fingers.peek().is_some() {
+                fingers.fold((None, None), |(l, r), &(_, hand, finger)| match hand {
+                    Hand::Left => (Some(finger), r),
+                    Hand::Right => (l, Some(finger)),
+                })
+            } else {
+                shown.fingers(key)
+            };
             KeyLook {
                 velocity: keys
                     .velocity(key)
@@ -684,6 +704,43 @@ impl App {
             }
         });
         self.play_mouse(held);
+    }
+
+    /// The keys held now: on the MIDI keyboard, and with the mouse.
+    fn held_keys(&self) -> Vec<u8> {
+        (0..=127u8)
+            .filter(|&k| self.keys.held(k) || self.mouse_key == Some(k))
+            .collect()
+    }
+
+    /// The line above the keyboard: the chord held (its symbol, name and notes), the notes when
+    /// they make no chord, or the last chord, dimmed, once the keys are up.
+    fn chord_line(&mut self, ui: &mut egui::Ui) {
+        let reading = chords::read(&self.held_keys());
+        if let Some(Reading::Chord(c)) = &reading {
+            self.last_chord = Some(c.clone());
+        }
+        ui.horizontal_centered(|ui| match (&reading, &self.last_chord) {
+            (Some(Reading::Chord(c)), _) => {
+                ui.label(RichText::new(&c.symbol).strong().size(22.0));
+                ui.label(RichText::new(&c.name).size(15.0));
+                ui.label(RichText::new(&c.notes).weak().size(15.0));
+            }
+            (Some(Reading::Notes { notes, interval }), _) => {
+                ui.label(RichText::new(notes).size(15.0));
+                if let Some(i) = interval {
+                    ui.label(RichText::new(*i).weak().size(15.0));
+                }
+            }
+            (None, Some(c)) => {
+                ui.label(RichText::new(&c.symbol).weak().size(22.0));
+                ui.label(RichText::new(&c.name).weak().size(15.0));
+                ui.label(RichText::new(&c.notes).weak().size(15.0));
+            }
+            (None, None) => {
+                ui.label(RichText::new("Play a chord to see its name and fingering").weak());
+            }
+        });
     }
 
     /// Plays the key the mouse holds on the on-screen keyboard: a note at full velocity, released
@@ -1160,10 +1217,13 @@ impl eframe::App for App {
             self.instruments_window(ui.ctx());
         }
         self.record_scale();
-        // Bottom panels stack upwards: the keyboard at the very bottom, the bar above it.
+        // Bottom panels stack upwards: the keyboard at the very bottom, the chord line, the bar.
         egui::Panel::bottom("keyboard")
             .exact_size(200.0)
             .show(ui, |ui| self.keyboard(ui));
+        egui::Panel::bottom("chord")
+            .exact_size(36.0)
+            .show(ui, |ui| self.chord_line(ui));
         egui::Panel::bottom("bar").exact_size(40.0).show(ui, |ui| self.bar(ui));
         let fill = ui.visuals().panel_fill;
         egui::CentralPanel::default()

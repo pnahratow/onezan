@@ -1,6 +1,6 @@
 # onezan: status and handoff
 
-Last updated: 2026-11-23. Read this first when resuming.
+Last updated: 2026-11-25. Read this first when resuming.
 
 ## What onezan is
 
@@ -87,6 +87,8 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         instrument and keyboard used last time; data/config folder paths
   instrument_state.rs   the instrument's sound (plugin state) per plugin, saved on quit
   progress.rs           practice history: every note with its scale, in SQLite; practice time
+  chords.rs             chord names (root, type, inversion, spelling) and a fingering for the held
+                        keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
                         hands, any octaves; the preview the window shows
 build/                  Linux release build in a container (glibc 2.30+); Windows release zip
@@ -548,3 +550,64 @@ strips it (27 to 20 MB), and zips it with README.md and LICENSE as
 the zip there. It fails if the exe would need a MinGW runtime DLL (libgcc, libstdc++,
 libwinpthread). Uncommitted changes make the name `COMMIT-dirty`. The zip from 49f2cb3 opened
 its window and listed Surge XT under Wine; not run on real Windows yet.
+
+## Chords (2026-11-25)
+
+`apps/onezan/src/chords.rs`. A line between the bar and the keyboard names what is held: the
+chord's symbol (C/E), its name (C major, first inversion) and its notes as played, spelled from
+the root (E G# B, not E Ab B). Keys that make no chord show their names, and for two notes the
+interval. Once the keys are up the last chord stays, dimmed. A chord held gets fingering badges on
+its keys where the sources agree (below), in place of the scale's on those keys.
+
+- **Naming**: every held pitch class is tried as the root against 20 chord types (major, minor,
+  dim, aug, sus2, sus4, 7, maj7, m7, m7b5, dim7, 6, m6, mMaj7, 7sus4, add9, madd9, 9, maj9, m9).
+  Sevenths and ninths also match without their fifth. Ties: the root in the bass wins (A C E G is
+  Am7, C E G A is C6), then the full chord, then the simpler type. A bass other than the root
+  gives a slash chord, named by its inversion.
+- **Hands**: which hand plays is not guessed. Keys within an octave get both hands' fingerings
+  (where agreed), stacked like the scale badges; wider, they are split at the biggest gap each
+  hand can span, the lower part left hand. A lone bass note or an interval gets no badge.
+- Checked in the VM through Midi Through (first version, before the table below): the chord
+  line, the dimmed last chord, badges. Not checked by hand on a real keyboard.
+
+## Chord fingering (2026-11-25)
+
+A table, not a rule, and deliberately incomplete: **a fingering is shown only where at least
+two sources give one and none gives another.** There is no official standard for block chords:
+the exam boards' books (ABRSM, Trinity, RCM) print broken chords and arpeggios, and teachers
+differ. Covered: major and minor triads in close position, and the same with the bottom note
+doubled an octave up (C E G C), each inversion. Nothing for diminished, augmented, seventh or
+other chords, wider voicings, or a hand holding one note or an interval. The tests hold the
+sources' numbers verbatim and work out from them what may be shown, so the table cannot drift
+from them.
+
+- "Piano Chords in Inversions", appendix 16.2 of a Salvation Army music manual
+  (music.saconnects.org, an engraved score; read from the rendered pages): triads and four-note
+  chords in all 24 keys, both hands, the same fingering in every key. Triads RH 135 125 124, LH
+  531 531 521 (minor: 531 421 521); four notes RH 1235 1245 1235, LH 5321 5421 5321.
+- musicandhealth.co.uk, a teacher's ABRSM-style syllabus: four-note broken chords key by key
+  (C, D, A, E, Eb, Ab, Db, B, Bb, F# major; F, C, G, F#, C#, G#, B, Bb, Eb minor). RH 1235 1245,
+  then 1245 (major) or 1235 (minor); the LH depends on the key: root position 5421 in C and all
+  minors, 5321 in the other majors. Where it offers an alternative, its first choice counts.
+- Hoffman Academy, "Chord Inversions" (chart and text: "all fingerings here use the third finger
+  except first inversion on the right hand and second inversion on the left, which use finger
+  2") and Piano with Lauren's chart: triads RH 135 125 135, LH 531 531 521.
+- Yamaha, "Basic piano chords for beginners": major and minor root position 1 3 5.
+
+Shown: triads RH root 135, 1st 125; LH root 531, 1st 531 (major only), 2nd 521. Four notes RH
+root 1235, 1st 1245, 2nd 1235 (minor only); LH 1st 5421 (not D, A, E, F#, C#, G# minor), 2nd
+5321, root 5321 (major, not C, F, G).
+
+Left out because the sources differ: RH second inversion triad (135 Hoffman and Lauren / 124
+Salvation Army; Strum&Key and Deviant Noise list both); LH first inversion minor triad (531 /
+421); four notes RH second inversion major (1235 / 1245); LH root position minor (5321 / 5421)
+and C major (5321 / 5421); LH first inversion F#, C#, G# minor (5421 / 5321). A key
+musicandhealth does not cover counts only where it gives the same fingering in every key it
+covers (so F and G major's LH root position, which varies there, is left out).
+
+Also read and not used: Strum&Key and Deviant Noise (commercial pages; their triads agree with
+Hoffman, with 124 as an alternative); seventh chords from Skoove (Cmaj7), vocalrangetest (C7
+root only) and musicandhealth's dominant seventh broken chord (Eb7): different chord types, one
+source each, and they disagree on inversions. Not reachable: the RCM and ABRSM books (not
+online), Wheaton College's arpeggio handout and an Ontario open textbook (both refused the
+download).
