@@ -6,6 +6,8 @@ and minor scale on an on-screen keyboard, plays what you play through a real VST
 
 For Linux and Windows. Free and open source (GPL-3.0-or-later).
 
+**[Download the latest release](https://github.com/pnahratow/onezan/releases/latest)**
+
 ![onezan playing through Surge XT: E natural minor's fingering on the keyboard, and an E minor
 chord held, named and fingered](docs/screenshot.png)
 
@@ -30,8 +32,8 @@ replug it: onezan picks it up. Everything can be changed in the window, but noth
 
 ## Getting started
 
-1. Download onezan for your system from the Releases page: an AppImage or a plain binary for
-   Linux, a zip for Windows. No installation needed.
+1. [Download onezan](https://github.com/pnahratow/onezan/releases/latest) for your system: an
+   AppImage or a plain binary for Linux, a zip for Windows. No installation needed.
 2. Connect your MIDI keyboard and start onezan.
 3. Click **Scale** in the bar above the keyboard and pick a scale. Its fingering appears on the
    keyboard: right hand in blue, left hand in orange.
