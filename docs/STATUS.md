@@ -241,7 +241,9 @@ works on any GL driver (the VM has only llvmpipe).
   resizes it (a tiling desktop does so at once; once it stayed white without that).
 - **Status bar**: instrument and MIDI names cut to 24 characters with "…" (full names in the
   hover report), MIDI port (green dot when connected; "plug in a keyboard" otherwise;
-  live), a pedal LED (amber while sustain is down; always there, so nothing moves), audio
+  live), a pedal LED (amber while sustain is down; always there, so nothing moves; a click
+  latches the pedal down, the next click or a release of the real pedal lets go: `MousePedal`,
+  sent on channel 0 like the mouse's notes, not checked with the mouse yet), audio
   backend and block length, timing mode. Hovering an
   item shows the startup report for it (what was chosen, why, the alternatives). On the right,
   the fingering picker. When the window is narrow the left part is cut off, not overlapped.

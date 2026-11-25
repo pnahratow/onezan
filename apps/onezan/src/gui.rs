@@ -147,6 +147,8 @@ struct App {
     range: RangeInclusive<u8>,
     /// The key held down with the mouse on the on-screen keyboard.
     mouse_key: Option<u8>,
+    /// The sustain pedal as pressed with the mouse (the bar's Pedal light).
+    mouse_pedal: MousePedal,
     preview: Preview,
     /// The last chord played, shown dimmed once the keys are up.
     last_chord: Option<Chord>,
@@ -225,6 +227,7 @@ impl App {
             midi,
             range: keyboard::DEFAULT_RANGE,
             mouse_key: None,
+            mouse_pedal: MousePedal::default(),
             preview: settings
                 .scale
                 .as_deref()
@@ -325,7 +328,7 @@ impl App {
     fn bar(&mut self, ui: &mut egui::Ui) {
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, self.preview);
         let (lists, audio_note) = (&mut self.menus, self.audio_note.as_deref());
-        let mut pick = None;
+        let (mut pick, mut pedal_clicked) = (None, false);
         let (options, scales, instruments) = (
             &mut self.open.options,
             &mut self.open.scales,
@@ -369,13 +372,14 @@ impl App {
                 if shown.is_none() {
                     lists.ports = None;
                 }
-                // Always there, lit while the pedal is down: the layout does not move.
+                // Always there, lit while the pedal is down: the layout does not move. A click
+                // presses or releases it.
                 let pedal = if keys.sustain() {
                     Color32::from_rgb(251, 191, 36)
                 } else {
                     Color32::from_gray(70)
                 };
-                item(ui, "Pedal", "", Some(pedal), None);
+                pedal_clicked = pedal_item(ui, pedal);
                 if let Some(s) = session {
                     let r = menu_item(ui, "Audio", short("audio out"), None, section("audio out"));
                     let shown = egui::Popup::menu(&r)
@@ -408,6 +412,22 @@ impl App {
         );
         if let Some(p) = pick {
             self.apply(p);
+        }
+        if pedal_clicked {
+            let event = self.mouse_pedal.click(self.keys.sustain());
+            self.keys.set_sustain(self.mouse_pedal.pressed);
+            if let Some(s) = self.session.as_mut() {
+                s.play(event);
+            }
+        }
+    }
+
+    /// Releases the pedal the mouse pressed once the keyboard's pedal is released.
+    fn follow_pedal(&mut self) {
+        if let Some(event) = self.mouse_pedal.follow(self.keys.sustain())
+            && let Some(s) = self.session.as_mut()
+        {
+            s.play(event);
         }
     }
 
@@ -857,6 +877,40 @@ impl<'a> KeyLooks<'a> {
 /// How hard a key played with the mouse is struck: full velocity.
 const MOUSE_VELOCITY: u8 = 127;
 
+/// The sustain pedal pressed with the mouse: a click presses it, the next click releases it,
+/// and so does releasing the keyboard's own pedal. The light shows one pedal state for both
+/// ([`Keys::sustain`]); this only remembers that the mouse pressed it, so that a release on the
+/// keyboard also releases what the mouse sent (on channel 0, like the mouse's notes).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct MousePedal {
+    pressed: bool,
+}
+
+impl MousePedal {
+    /// A click on the light, with the pedal as shown now: what to play.
+    const fn click(&mut self, down: bool) -> MidiEvent {
+        self.pressed = !down;
+        pedal_event(!down)
+    }
+
+    /// The pedal as shown now; a release (from the keyboard, or the keyboard unplugged) while
+    /// the mouse holds the pedal gives the release to play for the mouse's channel.
+    fn follow(&mut self, down: bool) -> Option<MidiEvent> {
+        (self.pressed && !down).then(|| {
+            self.pressed = false;
+            pedal_event(false)
+        })
+    }
+}
+
+const fn pedal_event(down: bool) -> MidiEvent {
+    MidiEvent::ControlChange {
+        channel: 0,
+        controller: 64,
+        value: if down { 127 } else { 0 },
+    }
+}
+
 /// The metronome's controls, right to left (the bar's right side is laid out that way): the
 /// tempo, then the switch. Its sound and volume are in the options window.
 /// Starts the instrument, keyboard and audio with `opts`; the bar's MIDI state follows the
@@ -1180,26 +1234,22 @@ fn shorten(name: &str) -> String {
     s
 }
 
-/// One item of the top bar: "Label value", with the report's reasons on hover.
-fn item(ui: &mut egui::Ui, label: &str, value: &str, dot: Option<Color32>, why: Option<&Section>) {
+/// The bar's "Pedal ●" item, lit in `colour`; it can be clicked. Returns whether it was.
+fn pedal_item(ui: &mut egui::Ui, colour: Color32) -> bool {
     let r = ui
         .horizontal(|ui| {
-            ui.label(RichText::new(label).weak());
-            if let Some(c) = dot {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), 4.0, c);
-            }
-            if !value.is_empty() {
-                ui.label(value);
-            }
+            ui.label(RichText::new("Pedal").weak());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, colour);
         })
         .response;
-    if let Some(s) = why {
-        // A layout's own response does not sense the pointer; this area does.
-        ui.interact(r.rect, ui.id().with(label), egui::Sense::hover())
-            .on_hover_text(explain(s));
-    }
+    let clicked = ui
+        .interact(r.rect, ui.id().with("pedal"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Click to hold the sustain pedal down; click again, or release the real pedal, to let go")
+        .clicked();
     ui.separator();
+    clicked
 }
 
 /// One item of the bar that opens a menu: "Label ● value" with the value as a button, the
@@ -1351,6 +1401,7 @@ impl eframe::App for App {
             self.instruments_window(ui.ctx());
         }
         self.record_scale();
+        self.follow_pedal();
         // Bottom panels stack upwards: the keyboard at the very bottom, the chord line, the bar.
         egui::Panel::bottom("keyboard")
             .exact_size(200.0)
@@ -1416,6 +1467,31 @@ fn to_u16(n: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mouse_pedal_toggles_and_lets_go_with_the_real_pedal() {
+        let mut p = MousePedal::default();
+        let value = |e| match e {
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: 64,
+                value,
+            } => value,
+            other => panic!("not a pedal event: {other:?}"),
+        };
+        // Click: down. Click again: up.
+        assert_eq!(value(p.click(false)), 127);
+        assert_eq!(p.follow(true), None, "held while the light is on");
+        assert_eq!(value(p.click(true)), 0);
+        assert_eq!(p.follow(false), None, "nothing more to release");
+        // Down by mouse, then the real pedal goes up: released for the mouse's channel too.
+        p.click(false);
+        assert_eq!(p.follow(false).map(value), Some(0));
+        assert_eq!(p.follow(false), None, "released once");
+        // The real pedal down: a click releases it.
+        assert_eq!(value(p.click(true)), 0);
+        assert_eq!(p.follow(false), None);
+    }
 
     fn c_major() -> Shown {
         Preview::from_name("C major").unwrap().shown()

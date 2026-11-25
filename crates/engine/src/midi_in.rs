@@ -126,6 +126,13 @@ impl Keys {
         self.sustain.load(Ordering::Relaxed)
     }
 
+    /// Sets the sustain pedal as shown, for a pedal pressed elsewhere (by the mouse). The next
+    /// pedal event from the keyboard sets it again.
+    pub fn set_sustain(&self, down: bool) {
+        self.sustain.store(down, Ordering::Relaxed);
+        self.wake();
+    }
+
     /// Sets what runs after every change, on the MIDI thread (for example, a GUI repaint
     /// request). Only the first call counts.
     pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
@@ -516,6 +523,29 @@ mod tests {
         // Nothing is held any more.
         feed.release_all();
         assert_eq!(drain(&mut rx), []);
+    }
+
+    #[test]
+    fn the_keyboards_pedal_overrides_a_pedal_set_by_hand() {
+        let (tx, _rx) = crate::midi_queue();
+        let keys = Arc::new(Keys::default());
+        let mut feed = Feed::new(tx, Arc::clone(&keys));
+        let pedal = |value| MidiEvent::ControlChange {
+            channel: 0,
+            controller: 64,
+            value,
+        };
+        keys.set_sustain(true);
+        assert!(keys.sustain());
+        // Pressed and released on the keyboard while down by hand: up.
+        feed.send(pedal(127));
+        assert!(keys.sustain());
+        feed.send(pedal(0));
+        assert!(!keys.sustain());
+        // Released on the keyboard without being pressed there first: up too.
+        keys.set_sustain(true);
+        feed.send(pedal(0));
+        assert!(!keys.sustain());
     }
 
     fn names(v: &[&str]) -> Vec<String> {
