@@ -1,136 +1,100 @@
 # onezan
 
-Practise piano scales with your MIDI keyboard, on Linux and Windows. onezan plays your keyboard
-through a real VST3 instrument, or its built-in piano when there is none, and shows:
+**Practise piano scales with your MIDI keyboard.** onezan shows the fingering for every major
+and minor scale on an on-screen keyboard, plays what you play through a real VST3 instrument
+(or its own piano), and keeps track of how much you practised each scale.
 
-- an on-screen keyboard with the keys you hold and how hard you struck them;
-- the fingering for every major and minor scale (natural, harmonic, melodic) in all 12 keys,
-  both hands, with each scale's clef and key signature;
-- the name and a fingering of the chord you hold;
-- a metronome with tap tempo;
-- how long you practised each scale, and when you last played it.
+For Linux and Windows. Free and open source (GPL-3.0-or-later).
 
-It works without setup: it picks the keyboard, audio output and instrument by itself, and
-remembers your choices.
+## What it does
 
-## Build
+- **Fingering for every scale.** Major, natural minor, harmonic minor and melodic minor in all
+  12 keys, for both hands: numbered badges on the keys show which finger goes where.
+- **Clef and key signature** next to every scale in the list, so you see at a glance how it is
+  written.
+- **Chord names.** Hold a chord and onezan names it (root, type, inversion), with a fingering.
+- **Your sound.** Plays your keyboard through any VST3 instrument you have installed, with its
+  own editor in the window. Without one, it uses its built-in piano.
+- **A metronome**, with a tempo you can tap in.
+- **Practice history.** How long you practised each scale, and when you last played it.
+  Star your favourite scales and instruments to keep them at the top.
 
-Rust (stable, edition 2024) via [rustup](https://rustup.rs). On Linux, building needs the ALSA
-and JACK development files and `pkg-config`. JACK's are needed only to compile: the app loads
-JACK at runtime and runs without it.
+## It just works
 
-| System | Install |
-|---|---|
-| Debian, Ubuntu, Linux Mint | `sudo apt install libasound2-dev libjack-jackd2-dev pkg-config` |
-| Arch | `sudo pacman -S alsa-lib pipewire-jack pkgconf` (or `jack2` instead of `pipewire-jack`) |
+Start it and play. onezan finds your MIDI keyboard, the best audio output and an instrument by
+itself, and remembers what you used last time. Plug the keyboard in later, or unplug and
+replug it: onezan picks it up. Everything can be changed in the window, but nothing has to be.
 
-The built-in piano is a 57 MB SoundFont, embedded in the program but not kept in git. Fetch it
-once (needs `curl` and `bsdtar` or `7z`); without it the program builds, with a warning, and has no
-built-in piano. The release scripts below fetch it themselves.
+## Getting started
 
-```sh
-build/fetch-piano.sh        # -> assets/piano/
-```
+1. Download onezan for your system from the Releases page: an AppImage or a plain binary for
+   Linux, a zip for Windows. No installation needed.
+2. Connect your MIDI keyboard and start onezan.
+3. Click **Scale** in the bar above the keyboard and pick a scale. Its fingering appears on the
+   keyboard: right hand in blue, left hand in orange.
 
-Tested on Linux Mint 22 (the Debian line), Arch (the Arch line) and Windows.
+Useful to know:
 
-A binary runs only on systems whose glibc is at least as new as the one it was built on. For a
-binary that runs on most distributions (glibc 2.30+: Ubuntu 20.04+, Mint 20+, Debian 11+,
-Fedora 32+, Arch, openSUSE), build it in a container with rootless Podman (or Docker):
+- **Space** starts and stops the metronome; **T** taps the tempo.
+- You can play the on-screen keyboard with the mouse, and click the **Pedal** light to hold the
+  sustain pedal.
+- Hover over anything in the bar to see what onezan chose and why.
 
-```sh
-build/linux-release.sh      # -> target/linux-release/release/onezan
-```
+### Linux: lower latency
 
-It needs only Podman on the build machine, and only glibc and ALSA (`libasound.so.2`) on the
-machine it runs on; graphics and JACK are loaded at runtime.
+onezan prefers JACK when it is there. On PipeWire systems that is the `pipewire-jack` package:
+with it, onezan gets short audio blocks without any setup. On Debian, Ubuntu and Mint,
+PipeWire's JACK library is not on the library path; start onezan with `pw-jack onezan` (onezan
+tells you when this applies).
 
-On Linux, the Windows build can be checked with Wine (`wine` and the MinGW cross-compiler, e.g.
-Arch's `mingw-w64-gcc`): `cargo test --target x86_64-pc-windows-gnu --workspace` builds the tests
-for Windows and runs them under Wine.
+### Where onezan looks for instruments
 
-The Windows release zip (the exe, needing only DLLs that come with Windows 10 and 11, with this
-README and the licence) is cross-built the same way:
-
-```sh
-build/windows-release.sh [DIR]   # -> target/windows-release/onezan-VERSION-COMMIT-windows-x64.zip
-```
-
-With a folder given, the zip is copied there too. A build from uncommitted changes is named
-`COMMIT-dirty`.
-
-## Use
-
-```sh
-cargo run --release                    # the window: first instrument, first keyboard
-cargo run --release -- list            # installed VST3 instruments (--all for effects too)
-cargo run --release -- midi            # MIDI input ports
-cargo run --release -- play            # without the window
-cargo run --release -- play "Surge XT" --midi "Keystation"
-cargo run --release -- play --demo     # plays a C major scale through the plugin
-cargo run --release -- play --metronome 90   # with the metronome (the window has it too)
-cargo run --release -- render          # offline render check, no audio device needed
-cargo run --release -- play built-in   # the built-in piano, even when plugins are installed
-```
-
-Plugins are searched in `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` (Linux) and
-`%CommonProgramFiles%\VST3` (Windows), plus any folders in `$VST3_PATH`.
-
-On Debian, Ubuntu and Mint, PipeWire's JACK library is not on the library path: for the lowest
-latency, install `pipewire-jack` and start with `pw-jack onezan` (the app says so when it
-applies).
-
-## The built-in piano
-
-When no VST3 instrument is installed, or none loads, onezan plays its built-in piano; it can also
-be chosen in the window (Instrument). It is [FreePats](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html)'
-"Upright Piano KW", a Kawai upright recorded by Gonzalo and Roberto in 2017 and published under
-the Creative Commons CC0 1.0 public domain dedication, played with
-[rustysynth](https://github.com/sinshu/rustysynth) (MIT).
+VST3 instruments are found in `~/.vst3`, `/usr/lib/vst3` and `/usr/local/lib/vst3` on Linux,
+`%CommonProgramFiles%\VST3` on Windows, and in any folders listed in `$VST3_PATH`. A free one to
+start with is [Surge XT](https://surge-synthesizer.github.io/).
 
 ## Where the fingerings come from
 
-onezan shows the standard fingering taught for each scale, for both hands, in all 12 keys:
-major, natural minor, harmonic minor and melodic minor. It doesn't invent fingerings. Every scale
-was compared with at least two independent published charts:
+onezan shows the standard fingering taught for each scale. It doesn't invent fingerings. Every
+scale was compared with at least two independent published charts:
 [pianoscales.org](https://pianoscales.org/major.html),
 [Hoffman Academy's Melodic Minor Scale Fingering Guide](https://cdn.hoffmanacademy.com/blog/wp-content/uploads/2022/04/Melodic-Minor-Scale-Fingering-Guide.pdf),
 [Greg Spero's scale lessons](https://composition.gregspero.com/lessons/a3/),
 [musicandhealth.co.uk](https://musicandhealth.co.uk/scales_examples/fingering1.htm), and a
 [teaching chart from the University of Miami](https://www.cs.miami.edu/home/burt/music/finger-charts.html)
 that shows where the fourth finger falls in every key. The sources agree on almost every note.
-Where they differ, it's only about which finger starts or ends a scale in a few keys. In those
-cases onezan follows the majority, and the code records each case and the reason. The numbers
-from these charts are built into onezan's automated tests, so the tests fail if the fingerings
-ever change by accident. The tests also check that every scale can be played up and down over
-one to four octaves: the thumb only lands on white keys, and the hand only moves by passing the
-thumb under or crossing over it. Many good fingerings exist, and teachers and exam boards
-sometimes prefer others. If your teacher gives you a different one, follow your teacher.
+Where they differ, it's only about which finger starts or ends a scale in a few keys; onezan
+follows the majority. The numbers from these charts are built into onezan's tests, so the
+fingerings can't change by accident, and the tests check that every scale can be played up and
+down over one to four octaves with the thumb only on white keys.
 
-## Layout
+Many good fingerings exist, and teachers and exam boards sometimes prefer others. If your
+teacher gives you a different one, follow your teacher.
 
-| Crate | Role |
-|---|---|
-| `crates/vst3-host` | A small VST3 host on the `vst3` bindings crate: scan, load, wire component and controller, process notes and MIDI CCs (through `IMidiMapping`). |
-| `crates/engine` | MIDI input (`midir`), audio output (`cpal`), lock-free queues (`rtrb`) between them, and offline rendering. |
-| `apps/onezan` | The app: the window (egui) and the command line. |
+## Coming next
 
-## Not done yet
+onezan is growing into a full scale trainer:
 
-- Exercises: hands separately, contrary motion, more octaves, the way down.
-- Loading presets (`.vstpreset`); the instrument's current sound is kept between starts.
-- ASIO on Windows.
-- CLAP hosting (`clack-host`).
-- macOS module loading.
+- exercises: hands separately, contrary motion, more octaves, the way down (melodic minor
+  descends differently);
+- a suggested learning order, from C major to the black-key scales;
+- the scale written out on a grand staff;
+- ASIO on Windows for lower latency.
 
-## Status
+## Building from source
 
-See `docs/STATUS.md` for decisions, progress and next steps.
+See [docs/BUILDING.md](docs/BUILDING.md).
 
-## License
+## Credits and licence
 
-GPL-3.0-or-later. See `LICENSE`.
+Copyright © 2026 Philipp Nahratow. onezan is licensed under the GNU General Public License,
+version 3 or later. See `LICENSE`.
 
-The music symbols (clefs, sharps and flats) are drawn with [Bravura](https://github.com/steinbergmedia/bravura),
-© Steinberg Media Technologies GmbH, under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
-It is embedded in the program unchanged.
+- **Built-in piano:** [FreePats](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html)'
+  "Upright Piano KW", a Kawai upright recorded by Gonzalo and Roberto in 2017, released under
+  the Creative Commons CC0 1.0 public domain dedication. Played with
+  [rustysynth](https://github.com/sinshu/rustysynth) (MIT).
+- **Music symbols:** [Bravura](https://github.com/steinbergmedia/bravura), © Steinberg Media
+  Technologies GmbH, under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`), embedded
+  unchanged.
+- **VST** is a registered trademark of Steinberg Media Technologies GmbH.

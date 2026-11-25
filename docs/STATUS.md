@@ -102,7 +102,7 @@ apps/onezan/build.rs    embeds assets/piano/*.sf2 when present (cfg onezan_piano
 build/                  fetch-piano.sh (the built-in piano into assets/piano/, git-ignored);
                         Linux release build in a container (glibc 2.30+); Windows release zip
                         (windows-release.sh, cross-built with MinGW)
-README.md, LICENSE (GPL-3.0), .gitignore
+README.md (for users), LICENSE (GPL-3.0), .gitignore; docs/BUILDING.md (building, release builds, layout)
 ```
 
 Commit only when the user asks.
