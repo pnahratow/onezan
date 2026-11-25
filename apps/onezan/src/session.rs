@@ -66,8 +66,7 @@ fn load_instrument(opts: &Options) -> Result<(Chosen<Instrument>, String)> {
     let sound = loaded
         .instrument
         .plugin_mut()
-        .map(crate::instrument_state::restore)
-        .unwrap_or_default();
+        .map_or_default(crate::instrument_state::restore);
     let detail = [note, sound]
         .into_iter()
         .filter(|s| !s.is_empty())

@@ -288,8 +288,7 @@ pub fn fingering(keys: &[u8]) -> Vec<(u8, Hand, u8)> {
         .into_iter()
         .map(|(_, at)| keys.split_at(at))
         .find(|(low, high)| spannable(low) && spannable(high))
-        .map(|(low, high)| on(low, Hand::Left).into_iter().chain(on(high, Hand::Right)).collect())
-        .unwrap_or_default()
+        .map_or_default(|(low, high)| on(low, Hand::Left).into_iter().chain(on(high, Hand::Right)).collect())
 }
 
 /// Whether one hand can hold `keys` (sorted): five at most, within an octave.
@@ -302,8 +301,7 @@ fn spannable(keys: &[u8]) -> bool {
 fn on(keys: &[u8], hand: Hand) -> Vec<(u8, Hand, u8)> {
     Shape::of(keys)
         .and_then(|s| s.fingers(hand))
-        .map(|f| keys.iter().zip(f).map(|(&key, &finger)| (key, hand, finger)).collect())
-        .unwrap_or_default()
+        .map_or_default(|f| keys.iter().zip(f).map(|(&key, &finger)| (key, hand, finger)).collect())
 }
 
 /// A major or minor triad in close position, alone or with its bottom note an octave up.

@@ -25,9 +25,7 @@ impl PluginInfo {
 /// The standard VST3 folders for this platform, plus `$VST3_PATH` (path-list separated).
 #[must_use]
 pub fn default_search_paths() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::env::var_os("VST3_PATH")
-        .map(|v| std::env::split_paths(&v).collect())
-        .unwrap_or_default();
+    let mut out: Vec<PathBuf> = std::env::var_os("VST3_PATH").map_or_default(|v| std::env::split_paths(&v).collect());
     #[cfg(windows)]
     {
         for var in ["CommonProgramFiles", "CommonProgramFiles(x86)"] {

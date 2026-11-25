@@ -2,7 +2,7 @@
 
 ## Requirements
 
-Rust (stable, edition 2024) via [rustup](https://rustup.rs). On Linux, building needs the ALSA
+Rust via [rustup](https://rustup.rs): the version pinned in `rust-toolchain.toml` (1.100.0), which rustup picks up by itself. On Linux, building needs the ALSA
 and JACK development files and `pkg-config`. JACK's are needed only to compile: the app loads
 JACK at runtime and runs without it.
 

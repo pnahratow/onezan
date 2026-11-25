@@ -12,7 +12,12 @@ RUN apt-get update \
       ca-certificates curl build-essential pkg-config libasound2-dev libjack-jackd2-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Rust in /opt, readable by the (non-root) user the build runs as.
+# Rust in /opt, readable by the (non-root) user the build runs as: the version pinned in
+# rust-toolchain.toml (passed in by build/linux-release.sh), with the components that file names,
+# so rustup has nothing to install at build time (it could not: /opt is read-only for the user).
+ARG RUST_VERSION
 ENV RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
-RUN curl -sSf https://sh.rustup.rs | CARGO_HOME=/opt/cargo sh -s -- -y --profile minimal --default-toolchain stable \
+RUN test -n "$RUST_VERSION" \
+ && curl -sSf https://sh.rustup.rs | CARGO_HOME=/opt/cargo sh -s -- -y --profile minimal \
+      --default-toolchain "$RUST_VERSION" -c clippy -c rustfmt \
  && chmod -R a+rX /opt/rustup /opt/cargo

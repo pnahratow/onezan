@@ -20,7 +20,8 @@ else
   engine=docker
   as_user="-u $(id -u):$(id -g)"
 fi
-"$engine" build -t "$image" -f build/linux.Dockerfile build
+rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+"$engine" build -t "$image" --build-arg RUST_VERSION="$rust" -f build/linux.Dockerfile build
 # Crates are cached in target/, so later builds do not download them again.
 # shellcheck disable=SC2086 # $as_user is one or two words on purpose
 "$engine" run --rm $as_user -v "$PWD":/src -w /src \

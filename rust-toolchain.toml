@@ -1,0 +1,7 @@
+# One Rust for every build: here, in CI and in the Linux release container (build/linux.Dockerfile
+# reads the version from this file). The lints are strict (pedantic and nursery denied), so a
+# newer clippy can fail a build that passed; move this on purpose, then run build/check.sh.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
