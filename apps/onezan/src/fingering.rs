@@ -94,11 +94,40 @@ impl Scale {
 
     /// For example "Db major" or "F# harmonic minor": the usual spelling of each key.
     pub fn name(self) -> String {
+        format!("{} {}", self.root_name(), self.kind.name())
+    }
+
+    /// The root as the key is written: "Db", "F#", "C#".
+    fn root_name(self) -> &'static str {
         const MAJOR: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
         const MINOR: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"];
         let names = if self.kind == Kind::Major { MAJOR } else { MINOR };
-        let root = names.get(usize::from(self.root % 12)).copied().unwrap_or("?");
-        format!("{root} {}", self.kind.name())
+        names.get(usize::from(self.root % 12)).copied().unwrap_or("?")
+    }
+
+    /// The key signature: the number of sharps (positive) or flats (negative). Every minor
+    /// scale is written with the natural minor's signature; harmonic and melodic minor raise
+    /// their sixth and seventh with accidentals in the music, not in the signature.
+    pub fn key_signature(self) -> i8 {
+        // Steps round the circle of fifths from C: F -1, G 1, ...; a sharp adds 7, a flat takes 7.
+        let mut chars = self.root_name().chars();
+        let letter: i8 = match chars.next() {
+            Some('F') => -1,
+            Some('G') => 1,
+            Some('D') => 2,
+            Some('A') => 3,
+            Some('E') => 4,
+            Some('B') => 5,
+            _ => 0,
+        };
+        let accidental: i8 = match chars.next() {
+            Some('#') => 7,
+            Some('b') => -7,
+            _ => 0,
+        };
+        // A minor key has three fifths fewer than its tonic major (A minor is C major's signature).
+        let minor: i8 = if self.kind == Kind::Major { 0 } else { -3 };
+        letter.saturating_add(accidental).saturating_add(minor)
     }
 
     /// Whether the pitch class of `key` is in the scale (going up).
@@ -700,6 +729,44 @@ mod tests {
         assert_eq!(scale(H, 1).name(), "C# harmonic minor");
         assert_eq!(Scale::all().count(), 48);
         assert!(scale(H, 8).contains(67)); // G# harmonic minor's F## is G
+    }
+
+    #[test]
+    fn key_signatures() {
+        // Sharps positive, flats negative, as the keys are named.
+        let major = [
+            (0, 0),
+            (7, 1),
+            (2, 2),
+            (9, 3),
+            (4, 4),
+            (11, 5),
+            (6, 6),
+            (5, -1),
+            (10, -2),
+        ];
+        let major = major.into_iter().chain([(3, -3), (8, -4), (1, -5)]);
+        for (root, sig) in major {
+            assert_eq!(scale(M, root).key_signature(), sig, "{}", scale(M, root).name());
+        }
+        // Minor: the relative major's signature, the same for all three minor types.
+        let minor = [
+            (9, 0),
+            (4, 1),
+            (11, 2),
+            (6, 3),
+            (1, 4),
+            (8, 5),
+            (2, -1),
+            (7, -2),
+            (0, -3),
+        ];
+        let minor = minor.into_iter().chain([(5, -4), (10, -5), (3, -6)]);
+        for (root, sig) in minor {
+            for kind in [Kind::NaturalMinor, H, Kind::MelodicMinor] {
+                assert_eq!(scale(kind, root).key_signature(), sig, "{}", scale(kind, root).name());
+            }
+        }
     }
 
     #[test]

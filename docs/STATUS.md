@@ -95,6 +95,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
                         hands, any octaves; the preview the window shows
+  staff.rs              music notation with Bravura (assets/fonts/, SIL OFL 1.1, embedded
+                        unchanged: a subset may not keep the name): the clef and key signature
+                        in each row of the scales window
 apps/onezan/build.rs    embeds assets/piano/*.sf2 when present (cfg onezan_piano), else warns
 build/                  fetch-piano.sh (the built-in piano into assets/piano/, git-ignored);
                         Linux release build in a container (glibc 2.30+); Windows release zip

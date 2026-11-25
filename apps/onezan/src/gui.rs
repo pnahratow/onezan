@@ -201,6 +201,7 @@ fn midi_state(c: &MidiChange) -> MidiState {
 impl App {
     fn new(ctx: &egui::Context, opts: &Options, embedded: Shared, store: Store, settings: Settings) -> Self {
         style_buttons(ctx);
+        crate::staff::install(ctx);
         let keys = Arc::new(Keys::default());
         let progress_path = crate::progress::default_path();
         let recorder = progress_path.as_deref().and_then(Recorder::start);
@@ -644,7 +645,7 @@ impl App {
         let builder = egui::ViewportBuilder::default()
             .with_title("onezan scales")
             .with_app_id("onezan")
-            .with_inner_size([460.0, 640.0]);
+            .with_inner_size([560.0, 640.0]);
         let (preview, order, practice) = (&mut self.preview, &mut self.scale_order, &self.practice);
         let favorites = &mut self.favorite_scales;
         let history = self.recorder.is_some();
@@ -1187,11 +1188,12 @@ fn scale_list(
     let mut toggle = None;
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Grid::new("scales")
-            .num_columns(4)
+            .num_columns(5)
             .striped(true)
             .spacing([18.0, 6.0])
             .show(ui, |ui| {
                 ui.label("");
+                ui.label(RichText::new("Key").strong());
                 ui.label(RichText::new("Scale").strong());
                 ui.label(RichText::new("Time spent").strong());
                 ui.label(RichText::new("Last played").strong());
@@ -1202,6 +1204,7 @@ fn scale_list(
                     }
                     if grouped {
                         ui.label("");
+                        ui.label("");
                         ui.label(RichText::new(title).weak());
                         ui.end_row();
                     }
@@ -1209,6 +1212,8 @@ fn scale_list(
                         if star(ui, is_fav) {
                             toggle = Some(name.clone());
                         }
+                        crate::staff::key_signature(ui, scale.key_signature())
+                            .on_hover_text(signature_name(scale.key_signature()));
                         let selected = *preview == Preview::Scale(scale);
                         if ui.selectable_label(selected, &name).clicked() {
                             *preview = Preview::Scale(scale);
@@ -1226,6 +1231,17 @@ fn scale_list(
     });
     if let Some(name) = toggle {
         toggle_favorite(favorites, &name);
+    }
+}
+
+/// "No sharps or flats", "1 sharp", "3 flats".
+fn signature_name(sig: i8) -> String {
+    let n = sig.unsigned_abs();
+    let kind = if sig > 0 { "sharp" } else { "flat" };
+    match n {
+        0 => "No sharps or flats".to_owned(),
+        1 => format!("1 {kind}"),
+        _ => format!("{n} {kind}s"),
     }
 }
 

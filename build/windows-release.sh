@@ -28,8 +28,9 @@ rm -rf "${out:?}/$name" "$out/$name.zip"
 mkdir -p "$out/$name"
 # Without the debug symbols.
 x86_64-w64-mingw32-strip -o "$out/$name/onezan.exe" "$exe"
-# The GPL asks for the licence to travel with the program.
+# The GPL asks for the licence to travel with the program; the OFL the same for Bravura.
 cp README.md LICENSE "$out/$name/"
+cp assets/fonts/OFL.txt "$out/$name/Bravura-OFL.txt"
 (cd "$out" && zip -qr "$name.zip" "$name")
 zip="$out/$name.zip"
 echo "built: $zip ($(du -h "$zip" | cut -f1))"

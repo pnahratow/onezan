@@ -121,3 +121,7 @@ See `docs/STATUS.md` for decisions, progress and next steps.
 ## License
 
 GPL-3.0-or-later. See `LICENSE`.
+
+The music symbols (clefs, sharps and flats) are drawn with [Bravura](https://github.com/steinbergmedia/bravura),
+© Steinberg Media Technologies GmbH, under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
+It is embedded in the program unchanged.

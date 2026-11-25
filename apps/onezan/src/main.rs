@@ -23,6 +23,7 @@ mod progress;
 mod report;
 mod session;
 mod settings;
+mod staff;
 
 use plugins::{Installed, choose, installed};
 use report::{midi_change, print_report, print_section};
