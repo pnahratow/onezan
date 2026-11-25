@@ -686,7 +686,8 @@ impl App {
         };
         let held = keyboard::show(ui, range, |key| {
             let mut fingers = chord_fingers.iter().filter(|&&(k, _, _)| k == key).peekable();
-            let (left, right) = if fingers.peek().is_some() {
+            let chord = fingers.peek().is_some();
+            let (left, right) = if chord {
                 fingers.fold((None, None), |(l, r), &(_, hand, finger)| match hand {
                     Hand::Left => (Some(finger), r),
                     Hand::Right => (l, Some(finger)),
@@ -701,6 +702,7 @@ impl App {
                 in_scale: shown.in_scale(key),
                 left,
                 right,
+                chord,
             }
         });
         self.play_mouse(held);

@@ -557,7 +557,9 @@ its window and listed Surge XT under Wine; not run on real Windows yet.
 chord's symbol (C/E), its name (C major, first inversion) and its notes as played, spelled from
 the root (E G# B, not E Ab B). Keys that make no chord show their names, and for two notes the
 interval. Once the keys are up the last chord stays, dimmed. A chord held gets fingering badges on
-its keys where the sources agree (below), in place of the scale's on those keys.
+its keys where the sources agree (below), in place of the scale's on those keys. Chord badges
+are outlined (white circle, the hand's colour for ring and number), scale badges filled, so the
+two stay apart while a scale is shown.
 
 - **Naming**: every held pitch class is tried as the root against 20 chord types (major, minor,
   dim, aug, sus2, sus4, 7, maj7, m7, m7b5, dim7, 6, m6, mMaj7, 7sus4, add9, madd9, 9, maj9, m9).

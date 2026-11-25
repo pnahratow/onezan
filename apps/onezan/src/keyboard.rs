@@ -10,7 +10,9 @@
 //!    (right: blue, left: orange). They sit on the part of the key you see and touch: the lower
 //!    end of a black key, and the front of a white key below the black keys. When both hands use
 //!    the same key (hands together in unison, contrary motion), the left badge sits above the right
-//!    one, matching where the hands are on the piano.
+//!    one, matching where the hands are on the piano. A scale's fingering is a filled circle; a
+//!    chord's is outlined (a white circle with the hand's colour for its ring and number), so the
+//!    two never look alike when a chord is held while a scale is shown.
 //!
 //! C keys carry their octave name (C4 is middle C) at the very front.
 //!
@@ -33,6 +35,8 @@ pub struct KeyLook {
     /// The finger (1 to 5) of each hand on this key, if any.
     pub left: Option<u8>,
     pub right: Option<u8>,
+    /// The fingers are a chord's (drawn outlined), not the scale's (filled).
+    pub chord: bool,
 }
 
 pub const RIGHT_HAND: Color32 = Color32::from_rgb(37, 99, 235);
@@ -206,19 +210,24 @@ fn badges(painter: &egui::Painter, x: f32, lowest: f32, r: f32, l: KeyLook) {
     let mut y = lowest;
     for (finger, colour) in [(l.right, RIGHT_HAND), (l.left, LEFT_HAND)] {
         let Some(finger) = finger else { continue };
-        badge(painter, pos2(x, y), r, finger, colour);
+        badge(painter, pos2(x, y), r, finger, colour, l.chord);
         y -= r.mul_add(2.0, 2.0);
     }
 }
 
-fn badge(painter: &egui::Painter, at: Pos2, r: f32, finger: u8, colour: Color32) {
-    painter.circle(at, r, colour, Stroke::new(1.0, Color32::WHITE));
+fn badge(painter: &egui::Painter, at: Pos2, r: f32, finger: u8, colour: Color32, outlined: bool) {
+    let (fill, ring, text) = if outlined {
+        (Color32::WHITE, Stroke::new((r * 0.2).max(1.5), colour), colour)
+    } else {
+        (colour, Stroke::new(1.0, Color32::WHITE), Color32::WHITE)
+    };
+    painter.circle(at, r, fill, ring);
     painter.text(
         pos2(at.x, at.y + 0.5),
         Align2::CENTER_CENTER,
         finger.to_string(),
         FontId::proportional(r * 1.3),
-        Color32::WHITE,
+        text,
     );
 }
 
