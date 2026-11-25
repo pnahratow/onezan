@@ -194,7 +194,11 @@ fn pick_output() -> Result<(cpal::HostId, cpal::Device, Vec<Considered>)> {
 #[cfg(target_os = "linux")]
 fn jack_missing_why(pw_jack: bool) -> String {
     if pw_jack {
-        let args: Vec<String> = std::env::args().collect();
+        let mut args: Vec<String> = std::env::args().collect();
+        // Inside an AppImage, argv[0] is the temporary mount; `$APPIMAGE` is the file itself.
+        if let (Some(image), Some(first)) = (std::env::var_os("APPIMAGE"), args.first_mut()) {
+            *first = image.to_string_lossy().into_owned();
+        }
         format!(
             "no JACK server answered, but pw-jack is installed: for lower latency, start with `pw-jack {}`",
             args.join(" ")
