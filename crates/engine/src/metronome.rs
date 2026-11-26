@@ -282,7 +282,9 @@ impl Clicker {
     }
 
     /// Mixes the clicks of the next `left.len()` frames into `left` and `right`. A click still
-    /// sounding when the metronome is switched off rings out.
+    /// sounding when the metronome is switched off rings out. (Tests; the callback also
+    /// publishes the beat, with [`Self::render_heard_at`].)
+    #[cfg(test)]
     pub fn render(&mut self, m: &Metronome, left: &mut [f32], right: &mut [f32]) {
         self.render_heard_at(m, left, right, None);
     }

@@ -229,7 +229,7 @@ fn chord(played: &[u8], bass: u8, root: u8, k: &Kind) -> Chord {
 
 /// The natural pitch class of each letter, C to B.
 const NATURAL: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
-const LETTERS: [&str; 7] = ["C", "D", "E", "F", "G", "A", "B"];
+pub const LETTERS: [&str; 7] = ["C", "D", "E", "F", "G", "A", "B"];
 
 /// The letter (0 = C) a root is spelled with, and its name: flats for major-ish chords (Db, Eb,
 /// Ab, Bb; F#), sharps where minor keys use them (C#, F#, G#).

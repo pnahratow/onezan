@@ -65,12 +65,17 @@ pub struct Key {
 }
 
 impl Key {
+    /// Its place round the circle of fifths, 0 (seven flats) to 14 (seven sharps).
+    fn fifths(self) -> usize {
+        usize::try_from(self.sharps.clamp(-7, 7).saturating_add(7)).unwrap_or(7)
+    }
+
     /// The scale of this key: major, or natural minor for a minor key.
     pub fn scale(self) -> Scale {
         // The tonic's pitch class round the circle of fifths, from seven flats to seven sharps.
         const MAJOR: [u8; 15] = [11, 6, 1, 8, 3, 10, 5, 0, 7, 2, 9, 4, 11, 6, 1];
         const MINOR: [u8; 15] = [8, 3, 10, 5, 0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10];
-        let i = usize::try_from(self.sharps.clamp(-7, 7).saturating_add(7)).unwrap_or(7);
+        let i = self.fifths();
         let (roots, kind) = if self.minor {
             (MINOR, Kind::NaturalMinor)
         } else {
@@ -91,7 +96,7 @@ impl Key {
         const MINOR: [&str; 15] = [
             "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#",
         ];
-        let i = usize::try_from(self.sharps.clamp(-7, 7).saturating_add(7)).unwrap_or(7);
+        let i = self.fifths();
         let (names, kind) = if self.minor { (MINOR, "minor") } else { (MAJOR, "major") };
         format!("{} {kind}", names.get(i).copied().unwrap_or("C"))
     }
@@ -108,8 +113,9 @@ impl Song {
             // Down comes highest first; its top note is the last one up, played once.
             let down = s.notes(hand, root, 2, Direction::Down);
             let line = up.iter().chain(down.iter().rev().skip(1));
+            let last = up.len().saturating_add(down.len()).saturating_sub(2);
             for (i, &(key, finger)) in line.enumerate() {
-                let last = i.saturating_add(1) == up.len().saturating_add(down.len()).saturating_sub(1);
+                let last = i == last;
                 notes.push(Note {
                     key,
                     hand,
@@ -147,26 +153,25 @@ impl Song {
             Timing::Metrical(ppq) => 1.0 / f64::from(ppq.as_int().max(1)),
             Timing::Timecode(fps, sub) => 2.0 / (f64::from(fps.as_f32()) * f64::from(sub.max(1))),
         };
-        let mut bpm = None;
+        // The first tempo, in microseconds a beat.
+        let mut tempo: Option<u32> = None;
         // The first key signature.
         let mut key: Option<Key> = None;
         // Per part: (track or channel, notes); a part is a track, or a channel in a one-track file.
         let mut parts: BTreeMap<usize, Part> = BTreeMap::new();
         let one_track = smf.tracks.len() == 1;
         for (t, track) in smf.tracks.iter().enumerate() {
-            let mut tick: u64 = 0;
+            // u32 ticks: 4e9 is far beyond any song.
+            let mut tick: u32 = 0;
             let mut name_of_track = String::new();
-            // Sounding notes: (channel, key) -> (start beat).
-            let mut open: Vec<(u8, u8, f64, u8)> = Vec::new();
+            // Sounding notes: (channel, the note so far).
+            let mut open: Vec<(u8, Played)> = Vec::new();
             for ev in track {
-                tick = tick.saturating_add(u64::from(ev.delta.as_int()));
-                let beat = ticks(tick) * per_tick;
+                tick = tick.saturating_add(ev.delta.as_int());
+                let beat = f64::from(tick) * per_tick;
                 match ev.kind {
                     TrackEventKind::Meta(MetaMessage::Tempo(us)) => {
-                        if bpm.is_none() {
-                            let us = f64::from(us.as_int().max(1));
-                            bpm = Some(60_000_000.0 / us);
-                        }
+                        tempo.get_or_insert_with(|| us.as_int().max(1));
                     }
                     TrackEventKind::Meta(MetaMessage::KeySignature(sharps, minor)) => {
                         key.get_or_insert(Key { sharps, minor });
@@ -184,21 +189,27 @@ impl Song {
                             MidiMessage::NoteOff { key, .. } => (key.as_int(), 0),
                             _ => continue,
                         };
-                        if let Some(i) = open.iter().position(|&(c, k, _, _)| c == ch && k == key) {
+                        if let Some(i) = open.iter().position(|(c, n)| *c == ch && n.key == key) {
                             // A note on for a sounding key ends it first.
-                            let (_, _, start, velocity) = open.swap_remove(i);
+                            let (_, note) = open.swap_remove(i);
                             let id = if one_track { usize::from(ch) } else { t };
-                            let p = parts.entry(id).or_insert_with(|| Part {
-                                name: String::new(),
-                                notes: Vec::new(),
-                            });
+                            let p = parts.entry(id).or_default();
                             if p.name.is_empty() {
                                 p.name.clone_from(&name_of_track);
                             }
-                            p.notes.push((key, start, beat - start, velocity));
+                            p.notes.push(Played {
+                                len: beat - note.beat,
+                                ..note
+                            });
                         }
                         if vel > 0 {
-                            open.push((ch, key, beat, vel));
+                            let note = Played {
+                                key,
+                                beat,
+                                len: 0.0,
+                                velocity: vel,
+                            };
+                            open.push((ch, note));
                         }
                     }
                     _ => {}
@@ -213,7 +224,7 @@ impl Song {
         let signature = key.map(|k| k.sharps);
         let first = parts
             .iter()
-            .flat_map(|p| p.notes.iter().map(|&(_, b, _, _)| b))
+            .flat_map(|p| p.notes.iter().map(|n| n.beat))
             .fold(f64::INFINITY, f64::min);
         // Start on the beat the first note is in, keeping the notes' place in the beat.
         let shift = first.floor();
@@ -221,14 +232,14 @@ impl Song {
             .iter()
             .zip(hands)
             .flat_map(|(p, hand)| {
-                p.notes.iter().map(move |&(key, beat, len, velocity)| Note {
-                    key,
-                    hand: hand.unwrap_or(if key >= 60 { Hand::Right } else { Hand::Left }),
+                p.notes.iter().map(move |n| Note {
+                    key: n.key,
+                    hand: hand.unwrap_or(if n.key >= 60 { Hand::Right } else { Hand::Left }),
                     finger: None,
-                    velocity,
-                    letter: crate::chords::letter_of(key % 12, signature),
-                    beat: beat - shift,
-                    len: len.max(0.05),
+                    velocity: n.velocity,
+                    letter: crate::chords::letter_of(n.key % 12, signature),
+                    beat: n.beat - shift,
+                    len: n.len.max(0.05),
                 })
             })
             .collect();
@@ -237,10 +248,7 @@ impl Song {
             name: name.to_owned(),
             notes,
             key,
-            bpm: bpm.map(|b: f64| {
-                let b = b.round().clamp(1.0, 1000.0);
-                (1..=1000u32).find(|&n| f64::from(n) >= b).unwrap_or(120)
-            }),
+            bpm: tempo.and_then(bpm_of),
         })
     }
 
@@ -269,19 +277,28 @@ impl Song {
     }
 }
 
-/// A tick count as f64 (exact up to 2^53, far beyond any song).
-fn ticks(t: u64) -> f64 {
-    let (hi, lo) = (
-        u32::try_from(t >> 32).unwrap_or(u32::MAX),
-        u32::try_from(t & 0xffff_ffff).unwrap_or(0),
-    );
-    f64::from(hi).mul_add(4_294_967_296.0, f64::from(lo))
+/// Beats a minute from a MIDI tempo (microseconds a beat), rounded, 1 to 1000.
+fn bpm_of(us: u32) -> Option<u32> {
+    60_000_000u32
+        .checked_add(us.checked_div(2)?)?
+        .checked_div(us)
+        .map(|b| b.clamp(1, 1000))
 }
 
-/// The notes of one track (or channel) of a MIDI file: (key, beat, length).
+/// A note as read from a MIDI file, in beats from the file's start.
+#[derive(Clone, Copy)]
+struct Played {
+    key: u8,
+    beat: f64,
+    len: f64,
+    velocity: u8,
+}
+
+/// The notes of one track (or channel) of a MIDI file.
+#[derive(Default)]
 struct Part {
     name: String,
-    notes: Vec<(u8, f64, f64, u8)>,
+    notes: Vec<Played>,
 }
 
 /// Which hand plays each part: by its name, else the highest part the right hand and the
@@ -305,7 +322,7 @@ fn assign_hands(parts: &[Part]) -> Vec<Option<Hand>> {
         return parts.iter().map(named).collect();
     }
     let mean = |p: &Part| {
-        let sum: f64 = p.notes.iter().map(|&(k, _, _, _)| f64::from(k)).sum();
+        let sum: f64 = p.notes.iter().map(|n| f64::from(n.key)).sum();
         sum / f64::from(u32::try_from(p.notes.len().max(1)).unwrap_or(u32::MAX))
     };
     let highest = parts
@@ -331,6 +348,8 @@ pub enum Status {
 /// One play through a song.
 pub struct Run {
     pub song: Song,
+    /// When the song's last note ends ([`Song::end`]), worked out once.
+    end: f64,
     status: Vec<Status>,
     /// The notes wait at the keys until played; otherwise they keep the metronome's time.
     pub wait: bool,
@@ -348,6 +367,7 @@ impl Run {
     pub fn new(song: Song, wait: bool) -> Self {
         Self {
             status: vec![Status::Coming; song.notes.len()],
+            end: song.end(),
             song,
             wait,
             beat: -COUNT_IN,
@@ -376,7 +396,7 @@ impl Run {
 
     /// Played through: a beat after the last note ends.
     pub fn finished(&self) -> bool {
-        self.beat > self.song.end() + 1.0
+        self.beat > self.end + 1.0
     }
 
     /// Moves the clock on. Play along: to the metronome's beat (`None`: not clicking yet, the
@@ -463,7 +483,7 @@ fn window(bpm: f64) -> f64 {
 
 const FLASH_SECS: f64 = 0.35;
 
-const BACKGROUND: Color32 = Color32::from_rgb(24, 24, 30);
+pub const BACKGROUND: Color32 = Color32::from_rgb(24, 24, 30);
 const OCTAVE_LINE: Color32 = Color32::from_rgb(52, 52, 62);
 const FIFTH_LINE: Color32 = Color32::from_rgb(36, 36, 44);
 const BEAT_LINE: Color32 = Color32::from_rgb(34, 34, 42);
@@ -471,15 +491,6 @@ const HIT_LINE: Color32 = Color32::from_rgb(190, 190, 205);
 const HIT: Color32 = Color32::from_rgb(74, 222, 128);
 const WRONG: Color32 = Color32::from_rgb(239, 68, 68);
 const MISSED: Color32 = Color32::from_rgb(78, 78, 88);
-
-/// Mixes `c` towards `to` by `t` (0 to 1).
-fn mix(c: Color32, to: Color32, t: f32) -> Color32 {
-    let m = |a: u8, b: u8| {
-        let v = (f32::from(b) - f32::from(a)).mul_add(t, f32::from(a));
-        (0..=255u8).find(|&n| f32::from(n) >= v.round()).unwrap_or(255)
-    };
-    Color32::from_rgb(m(c.r(), to.r()), m(c.g(), to.g()), m(c.b(), to.b()))
-}
 
 /// Draws `song` falling into `area` at the song's `beat`, over the key columns `spans` (from
 /// [`crate::keyboard::key_spans`]); the keys are just below the area's bottom edge. `run` gives
@@ -546,15 +557,15 @@ pub fn draw(
             Hand::Right => RIGHT_HAND,
         };
         let base = if is_black(n.key) {
-            mix(hand, Color32::BLACK, 0.3)
+            hand.lerp_to_gamma(Color32::BLACK, 0.3)
         } else {
             hand
         };
         let status = run.map_or(Status::Coming, |r| r.status(i));
         let (fill, edge) = match status {
-            Status::Coming => (base, mix(base, Color32::WHITE, 0.35)),
-            Status::Hit => (mix(base, HIT, 0.55), Color32::WHITE),
-            Status::Missed => (MISSED, mix(hand, MISSED, 0.4)),
+            Status::Coming => (base, base.lerp_to_gamma(Color32::WHITE, 0.35)),
+            Status::Hit => (base.lerp_to_gamma(HIT, 0.55), Color32::WHITE),
+            Status::Missed => (MISSED, hand.lerp_to_gamma(MISSED, 0.4)),
         };
         let radius = (rect.width() * 0.25).min(6.0);
         painter.rect_filled(rect, radius, fill);
@@ -636,7 +647,7 @@ mod tests {
     /// A one-track format-0 file: tempo 100 BPM, 480 ticks a beat, C4 and E4 a beat each with
     /// a beat's rest first, and a drum note that is left out.
     fn small_midi() -> Vec<u8> {
-        let mut track = vec![
+        let track = vec![
             0x00, 0xFF, 0x51, 0x03, 0x09, 0x27, 0xC0, // tempo 600 000 µs: 100 BPM
             0x83, 0x60, 0x90, 60, 100, // after 480 ticks: C4 on
             0x00, 0x99, 36, 100, // drum
@@ -645,9 +656,14 @@ mod tests {
             0x83, 0x60, 0x90, 64, 0, // E4 off (velocity 0)
             0x00, 0xFF, 0x2F, 0x00,
         ];
+        midi_file(&track)
+    }
+
+    /// A one-track MIDI file, 480 ticks a beat, holding `track`'s events.
+    fn midi_file(track: &[u8]) -> Vec<u8> {
         let mut f = b"MThd\0\0\0\x06\0\0\0\x01\x01\xE0MTrk".to_vec();
         f.extend_from_slice(&u32::try_from(track.len()).unwrap().to_be_bytes());
-        f.append(&mut track);
+        f.extend_from_slice(track);
         f
     }
 
@@ -718,20 +734,14 @@ mod tests {
                 track.extend_from_slice(&[0x00, 0xFF, 0x59, 0x02, flats, 0x00]);
             }
             track.extend_from_slice(&[0x00, 0x90, 70, 100, 0x83, 0x60, 0x80, 70, 0, 0x00, 0xFF, 0x2F, 0x00]);
-            let mut f = b"MThd\0\0\0\x06\0\0\0\x01\x01\xE0MTrk".to_vec();
-            f.extend_from_slice(&u32::try_from(track.len()).unwrap().to_be_bytes());
-            f.append(&mut track);
-            Song::from_midi(&f, "t").unwrap().notes[0].name()
+            Song::from_midi(&midi_file(&track), "t").unwrap().notes[0].name()
         };
         assert_eq!(song(None), "Bb", "the usual name without a signature");
         let key = |b: &[u8]| {
             let mut track = vec![0x00, 0xFF, 0x59, 0x02];
             track.extend_from_slice(b);
             track.extend_from_slice(&[0x00, 0x90, 60, 100, 0x83, 0x60, 0x80, 60, 0, 0x00, 0xFF, 0x2F, 0x00]);
-            let mut f = b"MThd\0\0\0\x06\0\0\0\x01\x01\xE0MTrk".to_vec();
-            f.extend_from_slice(&u32::try_from(track.len()).unwrap().to_be_bytes());
-            f.append(&mut track);
-            Song::from_midi(&f, "t").unwrap().key.map(Key::name)
+            Song::from_midi(&midi_file(&track), "t").unwrap().key.map(Key::name)
         };
         assert_eq!(key(&[0xFE, 0]).as_deref(), Some("Bb major"));
         // Each key's scale has the key's name.
@@ -763,7 +773,12 @@ mod tests {
     fn hands_come_from_track_names_or_pitch() {
         let p = |name: &str, key| Part {
             name: name.to_owned(),
-            notes: vec![(key, 0.0, 1.0, 64)],
+            notes: vec![Played {
+                key,
+                beat: 0.0,
+                len: 1.0,
+                velocity: 64,
+            }],
         };
         assert_eq!(
             assign_hands(&[p("Piano", 40), p("Piano", 70)]),
