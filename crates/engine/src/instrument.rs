@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow};
 use onezan_vst3_host::{MidiEvent, Plugin, Processor};
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The id the built-in piano goes by where a plugin's class id would be (settings, `play`).
 pub const BUILT_IN_PIANO: &str = "built-in-piano";
@@ -43,6 +44,15 @@ impl Instrument {
         }
     }
 
+    /// The built-in piano, when it plays.
+    #[must_use]
+    pub const fn piano(&self) -> Option<&Piano> {
+        match self {
+            Self::Plugin(_) => None,
+            Self::Piano(p) => Some(p),
+        }
+    }
+
     pub const fn plugin_mut(&mut self) -> Option<&mut Plugin> {
         match self {
             Self::Plugin(p) => Some(p),
@@ -75,6 +85,8 @@ impl Instrument {
 pub struct Piano {
     name: String,
     sound_font: Arc<SoundFont>,
+    /// Its volume, shared with the voice: 1.0 is the SoundFont's own level (`f32` bits).
+    volume: Arc<AtomicU32>,
 }
 
 impl Piano {
@@ -88,16 +100,41 @@ impl Piano {
         Ok(Self {
             name: name.to_owned(),
             sound_font: Arc::new(sound_font),
+            volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
         })
+    }
+
+    /// The volume: 1.0 is the SoundFont's own level.
+    #[must_use]
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// Clamped to 0.0..=[`MAX_PIANO_VOLUME`]; heard from the next audio block.
+    pub fn set_volume(&self, volume: f32) {
+        let v = if volume.is_finite() {
+            volume.clamp(0.0, MAX_PIANO_VOLUME)
+        } else {
+            1.0
+        };
+        self.volume.store(v.to_bits(), Ordering::Relaxed);
     }
 
     fn start(&self, sample_rate: u32) -> Result<PianoVoice> {
         let rate = i32::try_from(sample_rate)?;
         let synth = Synthesizer::new(&self.sound_font, &SynthesizerSettings::new(rate))
             .map_err(|e| anyhow!("the built-in piano cannot play at {sample_rate} Hz: {e:?}"))?;
-        Ok(PianoVoice { synth })
+        Ok(PianoVoice {
+            level: synth.get_master_volume(),
+            synth,
+            volume: Arc::clone(&self.volume),
+            applied: f32::NAN,
+        })
     }
 }
+
+/// The loudest the built-in piano goes: twice its own level.
+pub const MAX_PIANO_VOLUME: f32 = 2.0;
 
 /// The audio-thread half of an [`Instrument`]. Move it into the audio callback.
 #[expect(clippy::large_enum_variant, reason = "one value, owned by the audio callback")]
@@ -119,11 +156,21 @@ impl Voice {
 
 pub struct PianoVoice {
     synth: Synthesizer,
+    /// The synthesizer's own master volume, which volume 1.0 keeps.
+    level: f32,
+    volume: Arc<AtomicU32>,
+    /// The volume last given to the synthesizer.
+    applied: f32,
 }
 
 impl PianoVoice {
     /// Renders up to each event's frame, then applies it: every event on its exact sample.
     fn process(&mut self, events: &[(usize, MidiEvent)], left: &mut [f32], right: &mut [f32]) {
+        let volume = f32::from_bits(self.volume.load(Ordering::Relaxed));
+        if volume.to_bits() != self.applied.to_bits() {
+            self.applied = volume;
+            self.synth.set_master_volume(self.level * volume);
+        }
         let frames = left.len().min(right.len());
         let mut done = 0;
         for &(at, event) in events {

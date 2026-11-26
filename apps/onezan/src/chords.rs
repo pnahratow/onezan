@@ -229,7 +229,7 @@ fn chord(played: &[u8], bass: u8, root: u8, k: &Kind) -> Chord {
 
 /// The natural pitch class of each letter, C to B.
 const NATURAL: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
-const LETTERS: [&str; 7] = ["C", "D", "E", "F", "G", "A", "B"];
+pub const LETTERS: [&str; 7] = ["C", "D", "E", "F", "G", "A", "B"];
 
 /// The letter (0 = C) a root is spelled with, and its name: flats for major-ish chords (Db, Eb,
 /// Ab, Bb; F#), sharps where minor keys use them (C#, F#, G#).
@@ -241,9 +241,22 @@ fn root_spelling(pc: u8, minorish: bool) -> (u8, String) {
     (letter, spell(letter, pc))
 }
 
+/// The letter (0 = C) a note is written with out of context: by the key signature's sharps
+/// (positive) or flats (negative), or with none known the major key spellings (Db, Eb, F#, Ab,
+/// Bb), as [`default_name`] gives them.
+pub fn letter_of(pc: u8, signature: Option<i8>) -> u8 {
+    const SHARPS: [u8; 12] = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
+    const FLATS: [u8; 12] = [0, 1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6];
+    match signature {
+        Some(s) if s < 0 => FLATS.get(usize::from(pc % 12)).copied().unwrap_or(0),
+        Some(_) => SHARPS.get(usize::from(pc % 12)).copied().unwrap_or(0),
+        None => root_spelling(pc, false).0,
+    }
+}
+
 /// `pc` written with `letter` and the accidentals it needs ("Fb", "G##"); a name without them
 /// when it would need more than two.
-fn spell(letter: u8, pc: u8) -> String {
+pub fn spell(letter: u8, pc: u8) -> String {
     let natural = NATURAL.get(usize::from(letter)).copied().unwrap_or(0);
     let accidental = match pc.wrapping_add(12).wrapping_sub(natural) % 12 {
         0 => "",

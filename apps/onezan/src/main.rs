@@ -24,6 +24,7 @@ mod report;
 mod session;
 mod settings;
 mod staff;
+mod waterfall;
 
 use plugins::{Installed, choose, installed};
 use report::{midi_change, print_report, print_section};

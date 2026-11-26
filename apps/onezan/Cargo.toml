@@ -19,6 +19,8 @@ winit = { version = "0.30", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+midly = { version = "0.5.3", default-features = false, features = ["alloc", "std"] }
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"

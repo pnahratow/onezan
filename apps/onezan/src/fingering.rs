@@ -58,10 +58,6 @@ impl Kind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the window shows scales going up; the trainer will use both")
-)]
 pub enum Direction {
     Up,
     Down,
@@ -97,6 +93,26 @@ impl Scale {
         format!("{} {}", self.root_name(), self.kind.name())
     }
 
+    /// The letter (0 = C) `key` is written with in this scale: each degree has its own letter
+    /// (F# major's seventh is E#, not F). A key outside the scale: as out of context.
+    pub fn letter(self, key: u8) -> u8 {
+        let root_letter = crate::chords::LETTERS
+            .iter()
+            .position(|l| self.root_name().starts_with(l))
+            .and_then(|i| u8::try_from(i).ok())
+            .unwrap_or(0);
+        let step = (key % 12).wrapping_add(12).wrapping_sub(self.root % 12) % 12;
+        // Up and down (melodic minor comes down as natural minor), the same letters per degree.
+        [Direction::Up, Direction::Down]
+            .into_iter()
+            .find_map(|d| self.kind.played(d).steps().iter().position(|&s| s == step))
+            .and_then(|degree| u8::try_from(degree).ok())
+            .map_or_else(
+                || crate::chords::letter_of(key % 12, None),
+                |degree| root_letter.wrapping_add(degree) % 7,
+            )
+    }
+
     /// The root as the key is written: "Db", "F#", "C#".
     fn root_name(self) -> &'static str {
         const MAJOR: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
@@ -128,6 +144,15 @@ impl Scale {
         // A minor key has three fifths fewer than its tonic major (A minor is C major's signature).
         let minor: i8 = if self.kind == Kind::Major { 0 } else { -3 };
         letter.saturating_add(accidental).saturating_add(minor)
+    }
+
+    /// Where each hand starts for two octaves hands together, as (left, right) MIDI keys: the
+    /// right hand on the root nearest middle C, the left hand two octaves lower, so the hands
+    /// meet on that root (C major: left hand C2 to C4, right hand C4 to C6).
+    pub const fn hand_roots(self) -> (u8, u8) {
+        let root = self.root % 12;
+        let right = if root <= 6 { 60_u8 } else { 48 }.saturating_add(root);
+        (right.saturating_sub(24), right)
     }
 
     /// Whether the pitch class of `key` is in the scale (going up).
@@ -331,9 +356,7 @@ impl Preview {
         };
         if let Self::Scale(s) = self {
             shown.scale = Some(s);
-            let root = s.root % 12;
-            let right_root = if root <= 6 { 60_u8 } else { 48 }.saturating_add(root);
-            let left_root = right_root.saturating_sub(24);
+            let (left_root, right_root) = s.hand_roots();
             for (hand, from, slots) in [
                 (Hand::Left, left_root, &mut shown.left),
                 (Hand::Right, right_root, &mut shown.right),

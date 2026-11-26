@@ -9,7 +9,7 @@ use onezan_vst3_host::MidiEvent;
 use rtrb::Consumer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What the callback drives: renders a part of a block with its events (`(frame, event)`,
 /// sorted, relative to the part). [`Voice`] in the app; a recording fake in the tests.
@@ -125,7 +125,9 @@ impl<V: Render> Callback<V> {
                     .map(|&(at, ev)| (at.saturating_sub(start), ev)),
             );
             self.voice.process(&self.part_events, l, r);
-            self.clicker.render(&self.metronome, l, r);
+            // Heard about one block from now: the block before it is playing.
+            let heard = now.checked_add(heard_after(start.saturating_add(frames), self.rate));
+            self.clicker.render_heard_at(&self.metronome, l, r, heard);
             start = end;
             for ((frame, &lv), &rv) in chunk.chunks_mut(ch).zip(l.iter()).zip(r.iter()) {
                 match frame {
@@ -140,6 +142,13 @@ impl<V: Render> Callback<V> {
             }
         }
     }
+}
+
+/// How long until frame `frames` of this callback's block is heard: the block before it is
+/// playing now, so about one block on.
+fn heard_after(frames: usize, rate: u32) -> Duration {
+    let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+    Duration::try_from_secs_f64(f64::from(frames) / f64::from(rate.max(1))).unwrap_or_default()
 }
 
 #[cfg(test)]

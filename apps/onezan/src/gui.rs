@@ -13,17 +13,20 @@ use crate::keyboard::{self, KeyLook};
 use crate::progress::{Practice, Recorder};
 use crate::session::{Options, Remembered, Section, Session, port_name};
 use crate::settings::{MetronomeSettings, Settings, Store};
+use crate::waterfall::{self, Run, Song};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
 use onezan_engine::{Click, Keys, Metronome, MidiChange, MidiTiming, Output, Verdict};
 use onezan_vst3_host::PluginInfo;
 use onezan_vst3_host::{Editor, MidiEvent};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -188,6 +191,45 @@ struct App {
     window_size: Option<[f32; 2]>,
     /// When the settings first differed from the saved ones.
     changed_at: Option<Instant>,
+    notes: Notes,
+    /// The built-in piano's volume (1.0: its own level), kept while another instrument plays.
+    piano_volume: f32,
+    /// Dark (the default) or light.
+    theme: egui::ThemePreference,
+}
+
+/// The falling notes, shown in place of the instrument's window.
+#[derive(Default)]
+#[expect(clippy::struct_excessive_bools, reason = "independent switches")]
+struct Notes {
+    /// Shown (the bar's Notes button).
+    on: bool,
+    /// The notes wait at the keys until played; otherwise they keep the metronome's time.
+    wait: bool,
+    /// The song opened, and its file; `None`: the scale shown falls.
+    song: Option<(Song, PathBuf)>,
+    /// Why the last song did not open.
+    song_note: Option<String>,
+    run: Option<Run>,
+    /// The run switched the metronome on, so it switches it off at its end.
+    started_metronome: bool,
+    /// The keys held at the last frame, to see which were pressed since.
+    was_held: Vec<u8>,
+    /// The window's clock at the last frame, seconds.
+    last_time: Option<f64>,
+    /// Where the keyboard was drawn, and its keys: the notes fall onto them.
+    keyboard: Option<(egui::Rect, RangeInclusive<u8>)>,
+    /// The answer of a file dialog open on a thread of its own.
+    picking: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// The app plays the falling notes through the instrument (for fun: normally you hear only
+    /// what you play).
+    play: bool,
+    /// The notes the app is playing now, as (key, velocity).
+    sounding: Vec<(u8, u8)>,
+    /// The run's beat at the last frame, to find the notes it passed since.
+    last_beat: Option<f64>,
+    /// Playing along without hearing the metronome (it keeps the time, silently).
+    silent: bool,
 }
 
 fn midi_state(c: &MidiChange) -> MidiState {
@@ -201,6 +243,8 @@ fn midi_state(c: &MidiChange) -> MidiState {
 impl App {
     fn new(ctx: &egui::Context, opts: &Options, embedded: Shared, store: Store, settings: Settings) -> Self {
         style_buttons(ctx);
+        let theme = theme_from_name(settings.theme.as_deref());
+        ctx.set_theme(theme);
         crate::staff::install(ctx);
         let keys = Arc::new(Keys::default());
         let progress_path = crate::progress::default_path();
@@ -218,6 +262,24 @@ impl App {
         let (editor, editor_note) = session.as_ref().map_or((None, None), |s| make_editor(ctx, s));
         if let Some(m) = session.as_ref().map(Session::metronome) {
             apply_metronome(m, &settings.metronome, opts.metronome.is_none());
+        }
+        let piano_volume = settings
+            .piano_volume
+            .filter(|v| v.is_finite())
+            .map_or(1.0, |v| v.clamp(0.0, onezan_engine::MAX_PIANO_VOLUME));
+        apply_piano_volume(session.as_ref(), piano_volume);
+        let mut notes = Notes {
+            on: settings.notes_view,
+            wait: settings.wait,
+            play: settings.play_notes,
+            silent: settings.notes_silent,
+            ..Notes::default()
+        };
+        if let Some(path) = &settings.song {
+            match read_song(path) {
+                Ok(song) => notes.song = Some((song, path.clone())),
+                Err(e) => notes.song_note = Some(e),
+            }
         }
         Self {
             editor,
@@ -257,6 +319,9 @@ impl App {
             window_size: settings.window,
             saved: settings,
             changed_at: None,
+            notes,
+            piano_volume,
+            theme,
         }
     }
 
@@ -306,6 +371,13 @@ impl App {
             midi,
             favorite_instruments: self.favorite_instruments.clone(),
             favorite_scales: self.favorite_scales.clone(),
+            notes_view: self.notes.on,
+            wait: self.notes.wait,
+            play_notes: self.notes.play,
+            notes_silent: self.notes.silent,
+            theme: theme_name(self.theme).map(str::to_owned),
+            piano_volume: Some(self.piano_volume).filter(|v| (v - 1.0).abs() > f32::EPSILON),
+            song: self.notes.song.as_ref().map(|(_, p)| p.clone()),
         }
     }
 
@@ -330,8 +402,9 @@ impl App {
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
+        let (notes_label, running) = (self.mode_label(), self.running());
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, self.preview);
-        let (lists, audio_note) = (&mut self.menus, self.audio_note.as_deref());
+        let lists = &mut self.menus;
         let (mut pick, mut pedal_clicked) = (None, false);
         let (options, scales, instruments) = (
             &mut self.open.options,
@@ -340,6 +413,12 @@ impl App {
         );
         let metronome = session.map(|s| Arc::clone(s.metronome()));
         let tap = &mut self.tap;
+        let notes_view = self.notes.on;
+        // With a song open, the metronome button switches the click (the song needs the
+        // metronome's time); without one it starts and stops the metronome as ever.
+        let has_song = self.notes.song.is_some();
+        let mut switch_view = false;
+        let silent = &mut self.notes.silent;
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
         egui::Sides::new().shrink_left().truncate().show(
             ui,
@@ -385,38 +464,38 @@ impl App {
                     Color32::from_gray(70)
                 };
                 pedal_clicked = pedal_item(ui, pedal);
-                if let Some(s) = session {
-                    let r = menu_item(ui, "Audio", short("audio out"), None, section("audio out"));
-                    let shown = egui::Popup::menu(&r)
-                        .align(egui::RectAlign::BOTTOM_START)
-                        .align_alternatives(&[egui::RectAlign::BOTTOM_END])
-                        .show(|ui| {
-                            let outputs = lists.outputs.get_or_insert_with(onezan_engine::audio_outputs);
-                            output_menu(ui, outputs, s, audio_note, &mut pick);
-                        });
-                    if shown.is_none() {
-                        lists.outputs = None;
-                    }
-                    let r = menu_item(ui, "Timing", short("timing"), None, section("timing"));
-                    egui::Popup::menu(&r)
-                        .align(egui::RectAlign::BOTTOM_START)
-                        .align_alternatives(&[egui::RectAlign::BOTTOM_END])
-                        .show(|ui| timing_menu(ui, s.timing(), &mut pick));
-                }
+                // The switch between the app's two sides: the instrument, and the falling notes.
+                let hover = if notes_view {
+                    "Back to the instrument's own window, to change its sound (a song playing goes on)"
+                } else {
+                    "Falling notes in place of the instrument's window: a song (a MIDI file) comes down to \
+                     the keys, to play as it arrives"
+                };
+                switch_view = mode_button(ui, notes_view, &notes_label).on_hover_text(hover).clicked();
+                ui.separator();
             },
             |ui| {
-                toggle(ui, options, "Options").on_hover_text("Click sound and volume, in a window of its own");
+                toggle(ui, options, "Options")
+                    .on_hover_text("Audio output, MIDI timing and the click's sound, in a window of its own");
                 ui.separator();
                 toggle(ui, scales, format!("Scale: {}", preview.name()))
                     .on_hover_text("Choose the scale whose fingering the keyboard shows, in a window of its own");
                 if let Some(m) = &metronome {
                     ui.separator();
-                    metronome_controls(ui, m, tap);
+                    metronome_controls(
+                        ui,
+                        m,
+                        tap,
+                        (has_song && (notes_view || running)).then_some(&mut *silent),
+                    );
                 }
             },
         );
         if let Some(p) = pick {
             self.apply(p);
+        }
+        if switch_view {
+            self.notes.on = !self.notes.on;
         }
         if pedal_clicked {
             let event = self.mouse_pedal.click(self.keys.sustain());
@@ -457,12 +536,15 @@ impl App {
     /// The options, in a window of their own: the plugin's editor covers anything drawn over
     /// the main window.
     fn options_window(&mut self, ctx: &egui::Context) {
-        let metronome = self.session.as_ref().map(|s| Arc::clone(s.metronome()));
+        let metronome = self.metronome().cloned();
         let builder = egui::ViewportBuilder::default()
             .with_title("onezan options")
             .with_app_id("onezan")
-            .with_inner_size([340.0, 200.0]);
+            .with_inner_size([420.0, 560.0]);
         let size = &mut self.options_size;
+        let (session, audio_note, lists) = (self.session.as_ref(), self.audio_note.as_deref(), &mut self.menus);
+        let theme = &mut self.theme;
+        let mut pick = None;
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("options"), builder, |ui, _| {
             let now = ui.ctx().input(|i| i.viewport().inner_rect);
             if now != *size {
@@ -479,12 +561,47 @@ impl App {
                         ui.label("No audio: nothing to set.");
                     }
                 }
+                let Some(s) = session else { return };
+                let in_use = |label| {
+                    s.section(label)
+                        .map_or_else(String::new, |sec: &Section| sec.short.clone())
+                };
+                ui.add_space(12.0);
+                ui.heading("Audio output");
+                ui.label(RichText::new(format!("In use: {}", in_use("audio out"))).weak())
+                    .on_hover_text(s.section("audio out").map_or_else(String::new, explain));
+                ui.add_space(4.0);
+                // Listed when the window opens (it takes a moment), again after it is reopened.
+                let outputs = lists.outputs.get_or_insert_with(onezan_engine::audio_outputs);
+                output_menu(ui, outputs, s, audio_note, &mut pick);
+                ui.add_space(12.0);
+                ui.heading("MIDI timing");
+                ui.label(RichText::new(format!("In use: {}", in_use("timing"))).weak())
+                    .on_hover_text(s.section("timing").map_or_else(String::new, explain));
+                ui.add_space(4.0);
+                timing_menu(ui, s.timing(), &mut pick);
+                ui.add_space(12.0);
+                ui.heading("Appearance");
+                ui.horizontal(|ui| {
+                    for (choice, label) in [
+                        (egui::ThemePreference::Dark, "Dark"),
+                        (egui::ThemePreference::Light, "Light"),
+                    ] {
+                        if ui.radio_value(theme, choice, label).clicked() {
+                            ui.ctx().set_theme(choice);
+                        }
+                    }
+                });
             });
             ui.ctx().input(|i| i.viewport().close_requested())
         });
+        if let Some(p) = pick {
+            self.apply(p);
+        }
         if close {
             self.open.options = false;
             self.options_size = None;
+            self.menus.outputs = None;
         }
     }
 
@@ -528,6 +645,7 @@ impl App {
             apply_metronome(m, &now.metronome, true);
             m.set_on(ticking);
         }
+        apply_piano_volume(session.as_ref(), self.piano_volume);
         self.error = session.is_none().then(|| "no instrument could be started".to_owned());
         (self.editor, self.editor_note) = session.as_ref().map_or((None, None), |s| make_editor(ctx, s));
         self.session = session;
@@ -728,23 +846,14 @@ impl App {
         self.placeholder(ui);
     }
 
-    fn placeholder(&self, ui: &mut egui::Ui) {
+    fn placeholder(&mut self, ui: &mut egui::Ui) {
+        if self.error.is_none() && self.session.as_ref().is_some_and(|s| s.instrument().piano().is_some()) {
+            self.piano_page(ui);
+            return;
+        }
         ui.centered_and_justified(|ui| match (&self.session, &self.error) {
             (_, Some(e)) => {
                 ui.label(RichText::new(e).color(Color32::from_rgb(239, 68, 68)));
-            }
-            (Some(s), None) if s.instrument().plugin().is_none() => {
-                let mut text = format!(
-                    "{}\n\nFreePats \"Upright Piano KW\", a Kawai upright piano (public domain).",
-                    crate::piano::NAME
-                );
-                if s.is_fallback() {
-                    text.push_str(
-                        "\nNo VST3 instrument could be loaded. Install one and choose it under Instrument \
-                         for other sounds.",
-                    );
-                }
-                ui.label(RichText::new(text).weak());
             }
             (Some(s), None) => {
                 let name = s.section("plugin").map_or("", |p| p.short.as_str());
@@ -755,6 +864,51 @@ impl App {
         });
     }
 
+    /// The built-in piano's page in place of a plugin's window: a drawing of an upright piano,
+    /// what it is, and its volume.
+    fn piano_page(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.session.as_ref() else { return };
+        let Some(piano) = s.instrument().piano() else { return };
+        let fallback = s.is_fallback();
+        let volume = &mut self.piano_volume;
+        let grey = ui.visuals().weak_text_color();
+        let free = ui.available_height();
+        ui.vertical_centered(|ui| {
+            // The drawing, name, credit and slider together, about 330 points high, centred.
+            let size = egui::vec2(220.0, 190.0);
+            let height = if fallback { 370.0 } else { 330.0 };
+            ui.add_space(((free - height) / 2.0).max(8.0));
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            upright_piano(ui.painter(), rect, grey);
+            ui.add_space(16.0);
+            ui.label(RichText::new(crate::piano::NAME).size(18.0).color(grey));
+            ui.label(RichText::new("FreePats \"Upright Piano KW\", a Kawai upright piano (public domain)").weak());
+            if fallback {
+                ui.label(
+                    RichText::new(
+                        "No VST3 instrument could be loaded. Install one and choose it under Instrument for \
+                         other sounds.",
+                    )
+                    .weak(),
+                );
+            }
+            ui.add_space(16.0);
+            // A row of its own, centred under the text (a slider alone keeps to the left).
+            let row = egui::Rect::from_center_size(
+                egui::pos2(ui.max_rect().center().x, ui.cursor().top() + 12.0),
+                egui::vec2(280.0, 24.0),
+            );
+            ui.spacing_mut().slider_width = 170.0;
+            let r = ui.put(
+                row,
+                percent_slider(volume, onezan_engine::MAX_PIANO_VOLUME).text("Volume"),
+            );
+            if r.changed() {
+                piano.set_volume(*volume);
+            }
+        });
+    }
+
     fn keyboard(&mut self, ui: &mut egui::Ui) {
         // A key played outside the range widens it, so every played key stays visible.
         for key in 0..=127u8 {
@@ -762,15 +916,21 @@ impl App {
                 self.range = keyboard::widen(&self.range, key);
             }
         }
-        // The fingering shown widens it too, but only while it is shown.
+        // The fingering shown widens it too, but only while it is shown; so does a song falling.
+        let song = self.notes.song.as_ref().filter(|_| self.notes.on).map(|(s, _)| s);
         let shown = self.preview.shown();
-        let range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
-        let (keys, mouse) = (&self.keys, self.mouse_key);
+        let mut range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
+        for n in song.map_or(&[][..], |s| s.notes.as_slice()) {
+            range = keyboard::widen(&range, n.key);
+        }
+        self.notes.keyboard = Some((ui.available_rect_before_wrap(), range.clone()));
+        let (keys, mouse, sounding) = (&self.keys, self.mouse_key, &self.notes.sounding);
         let looks = KeyLooks::new(&shown, &self.held_keys());
         let held = keyboard::show(ui, range, |key| {
             let velocity = keys
                 .velocity(key)
-                .or_else(|| (mouse == Some(key)).then_some(MOUSE_VELOCITY));
+                .or_else(|| (mouse == Some(key)).then_some(MOUSE_VELOCITY))
+                .or_else(|| sounding.iter().find(|&&(k, _)| k == key).map(|&(_, v)| v));
             looks.look(key, velocity)
         });
         self.play_mouse(held);
@@ -821,22 +981,409 @@ impl App {
         }
         if let Some(s) = self.session.as_mut() {
             if let Some(key) = self.mouse_key {
-                s.play(MidiEvent::NoteOff {
-                    channel: 0,
-                    key,
-                    velocity: 64,
-                });
+                s.play(note_off(key));
             }
             if let Some(key) = held {
-                s.play(MidiEvent::NoteOn {
-                    channel: 0,
-                    key,
-                    velocity: MOUSE_VELOCITY,
-                });
+                s.play(note_on(key, MOUSE_VELOCITY));
             }
         }
         self.mouse_key = held;
     }
+}
+
+impl App {
+    fn metronome(&self) -> Option<&Arc<Metronome>> {
+        self.session.as_ref().map(Session::metronome)
+    }
+
+    /// The metronome's tempo (100 without audio).
+    fn bpm(&self) -> f64 {
+        self.metronome().map_or(100.0, |m| f64::from(m.bpm()))
+    }
+
+    /// The run while it goes (not yet played through).
+    fn live_run(&self) -> Option<&Run> {
+        self.notes.run.as_ref().filter(|r| !r.finished())
+    }
+
+    fn running(&self) -> bool {
+        self.live_run().is_some()
+    }
+
+    /// Whether the metronome keeps the time unheard: a song open, played along with, and its
+    /// click switched off (the metronome button). Everywhere else it clicks as ever.
+    fn metronome_silent(&self) -> bool {
+        self.notes.silent && self.notes.song.is_some() && self.live_run().is_some_and(|r| !r.wait)
+    }
+
+    /// The song that falls: the one opened, else the scale shown.
+    fn falling_song(&self) -> Option<Cow<'_, Song>> {
+        match (&self.notes.song, self.preview) {
+            (Some((song, _)), _) => Some(Cow::Borrowed(song)),
+            (None, Preview::Scale(s)) => Some(Cow::Owned(Song::scale(s))),
+            (None, Preview::Off) => None,
+        }
+    }
+
+    /// The name of the song that falls, without building a scale's notes.
+    fn falling_name(&self) -> Option<Cow<'_, str>> {
+        match (&self.notes.song, self.preview) {
+            (Some((song, _)), _) => Some(Cow::Borrowed(song.name.as_str())),
+            (None, Preview::Scale(s)) => Some(Cow::Owned(s.name())),
+            (None, Preview::Off) => None,
+        }
+    }
+
+    /// Starts playing the song through, or stops.
+    fn toggle_run(&mut self) {
+        let was = self.running();
+        self.stop_run();
+        if was {
+            return;
+        }
+        let Some(song) = self.falling_song().map(Cow::into_owned) else {
+            return;
+        };
+        let wait = self.notes.wait;
+        self.notes.run = Some(Run::new(song, wait));
+        if !wait && let Some(m) = self.metronome().cloned() {
+            self.notes.started_metronome = !m.is_on();
+            // Before it starts, or its first click would sound.
+            m.set_silent(self.metronome_silent());
+            m.set_on(true);
+        }
+    }
+
+    fn stop_run(&mut self) {
+        self.end_metronome();
+        self.release_notes();
+        self.notes.run = None;
+    }
+
+    /// Plays the notes the run passed since the last frame (when the app plays them): the ones
+    /// ending first, so a repeated key sounds again.
+    fn play_notes(&mut self) {
+        let beat = self.live_run().map(Run::beat);
+        let last = std::mem::replace(&mut self.notes.last_beat, beat);
+        let (Some(run), Some(now), Some(from), true) = (&self.notes.run, beat, last, self.notes.play) else {
+            return;
+        };
+        let (starts, ends) = run.song.between(from, now);
+        let Some(s) = self.session.as_mut() else { return };
+        for key in ends {
+            if let Some(i) = self.notes.sounding.iter().position(|&(k, _)| k == key) {
+                self.notes.sounding.swap_remove(i);
+                s.play(note_off(key));
+            }
+        }
+        for (key, velocity) in starts {
+            self.notes.sounding.push((key, velocity));
+            s.play(note_on(key, velocity));
+        }
+    }
+
+    /// Stops every note the app is playing.
+    fn release_notes(&mut self) {
+        self.notes.last_beat = None;
+        let sounding = std::mem::take(&mut self.notes.sounding);
+        if let Some(s) = self.session.as_mut() {
+            for (key, _) in sounding {
+                s.play(note_off(key));
+            }
+        }
+    }
+
+    /// Switches the metronome off if the run switched it on.
+    fn end_metronome(&mut self) {
+        if std::mem::take(&mut self.notes.started_metronome)
+            && let Some(m) = self.metronome()
+        {
+            m.set_on(false);
+        }
+    }
+
+    /// Opens a song dropped on the window, or chosen in the file dialog.
+    fn take_song(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
+        let picked = self.notes.picking.as_ref().and_then(|rx| rx.try_recv().ok());
+        if picked.is_some() {
+            self.notes.picking = None;
+        }
+        if let Some(path) = dropped.or_else(|| picked.flatten()) {
+            self.open_song(path);
+        }
+    }
+
+    /// Reads the song at `path`, shows it falling, and takes its tempo.
+    fn open_song(&mut self, path: PathBuf) {
+        match read_song(&path) {
+            Ok(song) => {
+                if let (Some(bpm), Some(m)) = (song.bpm, self.metronome()) {
+                    m.set_bpm(bpm);
+                }
+                self.stop_run();
+                self.notes.song = Some((song, path));
+                self.notes.song_note = None;
+                self.notes.on = true;
+            }
+            Err(e) => self.notes.song_note = Some(e),
+        }
+    }
+
+    /// Asks for a song in the system's file dialog, on a thread of its own so the window keeps
+    /// drawing; [`Self::take_song`] receives the answer.
+    fn pick_song(&mut self, ctx: &egui::Context) {
+        if self.notes.picking.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let started = std::thread::Builder::new().name("song dialog".into()).spawn(move || {
+            let path = rfd::FileDialog::new()
+                .set_title("Open a song")
+                .add_filter("MIDI files", &["mid", "midi", "kar"])
+                .pick_file();
+            let _ = tx.send(path);
+            ctx.request_repaint();
+        });
+        match started {
+            Ok(_) => self.notes.picking = Some(rx),
+            Err(e) => self.notes.song_note = Some(format!("no file dialog: {e}")),
+        }
+    }
+
+    /// The keys pressed since the last frame (MIDI keyboard and mouse).
+    fn newly_pressed(&mut self) -> Vec<u8> {
+        let held = self.held_keys();
+        let pressed = held
+            .iter()
+            .copied()
+            .filter(|k| !self.notes.was_held.contains(k))
+            .collect();
+        self.notes.was_held = held;
+        pressed
+    }
+
+    /// The mode button's text: where it leads, and the score while a song goes on behind the
+    /// plugin's window.
+    fn mode_label(&self) -> String {
+        match self.live_run() {
+            Some(r) if !self.notes.on => {
+                let (hit, all) = r.score();
+                format!("Learn Song ▶ {hit}/{all}")
+            }
+            _ if self.notes.on => "Edit instrument".to_owned(),
+            _ => "Learn Song".to_owned(),
+        }
+    }
+
+    /// Moves the run on, every frame and whichever view is shown: the song keeps going (and
+    /// playing, and judging the keys) while the plugin's window is shown to change its sound.
+    fn tick_run(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|i| i.time);
+        let dt = self.notes.last_time.map_or(0.0, |t| (time - t).clamp(0.0, 0.25));
+        self.notes.last_time = Some(time);
+        let metronome = self.metronome().cloned();
+        let bpm = self.bpm();
+        let pressed = self.newly_pressed();
+
+        // A run of another song (the scale or song changed) stops.
+        let stale = self
+            .notes
+            .run
+            .as_ref()
+            .is_some_and(|r| Some(r.song.name.as_str()) != self.falling_name().as_deref());
+        if stale {
+            self.stop_run();
+        }
+        let mut stopped = false;
+        if let Some(run) = self.notes.run.as_mut().filter(|r| !r.finished()) {
+            let beat = metronome.as_ref().and_then(|m| m.beat_now());
+            // Play along: the metronome switched off stops the run.
+            stopped = !run.wait && metronome.as_ref().is_some_and(|m| !m.is_on());
+            run.advance(beat, dt * bpm / 60.0, bpm);
+            for key in pressed {
+                run.press(key, bpm, time);
+            }
+            ctx.request_repaint();
+        }
+        if stopped {
+            self.stop_run();
+        }
+        self.play_notes();
+        if self.notes.run.as_ref().is_some_and(Run::finished) {
+            self.end_metronome();
+            self.release_notes();
+        }
+        if let Some(m) = self.metronome() {
+            m.set_silent(self.metronome_silent());
+        }
+    }
+
+    /// The top in the notes view: the controls, and the notes falling onto the keys.
+    fn falling_notes(&mut self, ui: &mut egui::Ui) {
+        let time = ui.input(|i| i.time);
+        let bpm = self.bpm();
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .fill(ui.visuals().panel_fill)
+            .show(ui, |ui| self.notes_controls(ui));
+
+        let area = ui.available_rect_before_wrap();
+        ui.allocate_rect(area, egui::Sense::hover());
+        let painter = ui.painter_at(area);
+        let spans = self
+            .notes
+            .keyboard
+            .as_ref()
+            .map_or_else(Vec::new, |(r, range)| keyboard::key_spans(*r, range.clone()));
+        let run = self.notes.run.as_ref();
+        let Some(song) = run.map(|r| Cow::Borrowed(&r.song)).or_else(|| self.falling_song()) else {
+            painter.rect_filled(area, 0.0, waterfall::BACKGROUND);
+            painter.text(
+                area.center(),
+                egui::Align2::CENTER_CENTER,
+                "Open a song: a MIDI file, or drop one here",
+                egui::FontId::proportional(18.0),
+                Color32::from_gray(170),
+            );
+            return;
+        };
+        let beat = run.map_or(-waterfall::COUNT_IN, Run::beat);
+        waterfall::draw(&painter, area, &spans, &song, run, beat, bpm, time);
+        let big = |text: String, size: f32| {
+            painter.text(
+                area.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(size),
+                Color32::from_gray(230),
+            );
+        };
+        match run {
+            None => big(
+                if self.notes.wait {
+                    "Space: start. The notes wait at the keys until you play them.".to_owned()
+                } else if self.notes.silent && self.notes.song.is_some() {
+                    "Space: start. The metronome keeps the time, unheard.".to_owned()
+                } else {
+                    "Space: start, with the metronome".to_owned()
+                },
+                20.0,
+            ),
+            Some(r) if r.finished() => {
+                let (hit, all) = r.score();
+                big(
+                    format!(
+                        "{hit} of {all} notes {}  ·  best streak {}\nSpace: again",
+                        if r.wait { "played" } else { "on time" },
+                        r.best_streak
+                    ),
+                    24.0,
+                );
+            }
+            Some(r) if !r.wait && r.beat() < 0.0 => {
+                #[expect(clippy::cast_possible_truncation, reason = "a count-in of a few beats")]
+                #[expect(clippy::as_conversions, reason = "no as-free f64 to i64 conversion")]
+                let left = (-r.beat()).ceil() as i64;
+                big(left.to_string(), 72.0);
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn notes_controls(&mut self, ui: &mut egui::Ui) {
+        let mut start = false;
+        let mut pick = false;
+        let mut close = false;
+        let mut key_scale = None;
+        ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
+            let running = self.notes.run.as_ref().is_some_and(|r| !r.finished());
+            start = ui
+                .button(if running { "■ Stop" } else { "▶ Start" })
+                .on_hover_text("Space")
+                .clicked();
+            let mut wait = self.notes.wait;
+            if ui
+                .checkbox(&mut wait, "Wait for me")
+                .on_hover_text("The notes stop at the keys until you play them, with no metronome")
+                .changed()
+            {
+                self.notes.wait = wait;
+                self.stop_run();
+            }
+            let mut play = self.notes.play;
+            if ui
+                .checkbox(&mut play, "Play the notes")
+                .on_hover_text(
+                    "While it runs (Start or Space), the app plays the falling notes through the instrument, \
+                     to listen along",
+                )
+                .changed()
+            {
+                self.notes.play = play;
+                if !play {
+                    self.release_notes();
+                }
+            }
+            ui.separator();
+            if let Some((song, path)) = &self.notes.song {
+                ui.label(RichText::new(format!("Song: {}", song.name)).strong())
+                    .on_hover_text(path.display().to_string());
+                // The key, when the file says (notation programs write it; recordings often not). A
+                // click shows its scale's fingering on the keys, another click none.
+                if let Some(k) = song.key {
+                    let mut shown = self.preview == Preview::Scale(k.scale());
+                    if toggle(ui, &mut shown, k.name())
+                        .on_hover_text(
+                            "The key the file gives (its first key signature). Click to show its scale's \
+                             fingering on the keys; again for none.",
+                        )
+                        .clicked()
+                    {
+                        key_scale = Some(if shown { Preview::Scale(k.scale()) } else { Preview::Off });
+                    }
+                }
+                close = ui.button("Close").on_hover_text("Close the song").clicked();
+            }
+            pick = ui
+                .button("Open song…")
+                .on_hover_text("A MIDI file (.mid); or drop one on the window")
+                .clicked();
+            if let Some(note) = &self.notes.song_note {
+                ui.label(RichText::new(note).color(Color32::from_rgb(239, 68, 68)));
+            }
+            if let Some(r) = &self.notes.run {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (hit, all) = r.score();
+                    ui.label(RichText::new(format!("{hit} / {all}   streak {}", r.streak)).monospace());
+                });
+            }
+        });
+        if start {
+            self.toggle_run();
+        }
+        if pick {
+            self.pick_song(ui.ctx());
+        }
+        if close {
+            self.stop_run();
+            self.notes.song = None;
+        }
+        if let Some(p) = key_scale {
+            self.preview = p;
+        }
+    }
+}
+
+/// Reads a MIDI file as a song, named after the file.
+fn read_song(path: &std::path::Path) -> Result<Song, String> {
+    let name = path
+        .file_stem()
+        .map_or_else(|| "song".to_owned(), |s| s.to_string_lossy().into_owned());
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Song::from_midi(&bytes, &name).map_err(|e| format!("{name}: {e}"))
 }
 
 /// What the keyboard shows on each key: the scale shown, and over it the chord held.
@@ -908,6 +1455,23 @@ impl MousePedal {
     }
 }
 
+/// A note the app plays itself (the mouse's, a song's): on channel 0, like the mouse pedal.
+const fn note_on(key: u8, velocity: u8) -> MidiEvent {
+    MidiEvent::NoteOn {
+        channel: 0,
+        key,
+        velocity,
+    }
+}
+
+const fn note_off(key: u8) -> MidiEvent {
+    MidiEvent::NoteOff {
+        channel: 0,
+        key,
+        velocity: 64,
+    }
+}
+
 const fn pedal_event(down: bool) -> MidiEvent {
     MidiEvent::ControlChange {
         channel: 0,
@@ -916,8 +1480,6 @@ const fn pedal_event(down: bool) -> MidiEvent {
     }
 }
 
-/// The metronome's controls, right to left (the bar's right side is laid out that way): Tap,
-/// the tempo, then the switch. Its sound and volume are in the options window.
 /// Starts the instrument, keyboard and audio with `opts`; the bar's MIDI state follows the
 /// keyboard. Prints the startup report. The error as text when nothing could be started.
 fn start_session(
@@ -961,6 +1523,13 @@ fn make_editor(ctx: &egui::Context, session: &Session) -> (Option<Editor>, Optio
     }
 }
 
+/// Gives a newly started built-in piano its volume (a plugin has its own).
+fn apply_piano_volume(session: Option<&Session>, volume: f32) {
+    if let Some(p) = session.and_then(|s| s.instrument().piano()) {
+        p.set_volume(volume);
+    }
+}
+
 /// Sets the metronome from saved settings; the tempo only when `tempo` (not given on the
 /// command line). A sound that no longer exists keeps the default.
 fn apply_metronome(m: &Metronome, s: &MetronomeSettings, tempo: bool) {
@@ -979,7 +1548,12 @@ fn apply_metronome(m: &Metronome, s: &MetronomeSettings, tempo: bool) {
     }
 }
 
-fn metronome_controls(ui: &mut egui::Ui, m: &Metronome, tap: &mut TapTempo) {
+/// The metronome's controls, right to left (the bar's right side is laid out that way): Tap,
+/// the tempo, then the switch. Its sound and volume are in the options window.
+///
+/// In the notes view (`silent` given) the button switches the click on and off instead: playing
+/// along keeps the metronome's time whether it is heard or not.
+fn metronome_controls(ui: &mut egui::Ui, m: &Metronome, tap: &mut TapTempo, silent: Option<&mut bool>) {
     if ui
         .button("Tap")
         .on_hover_text("Tap the tempo: click in time, or press T (a pause of 3 s starts over)")
@@ -994,14 +1568,22 @@ fn metronome_controls(ui: &mut egui::Ui, m: &Metronome, tap: &mut TapTempo) {
     if r.changed() {
         m.set_bpm(bpm);
     }
-    let on = m.is_on();
+    let on = silent.as_deref().map_or_else(|| m.is_on(), |s| !*s);
+    let hover = if silent.is_some() {
+        "Click: heard or not while playing along (the notes keep the metronome's time either way)"
+    } else {
+        "Metronome: start or stop (Space)"
+    };
     let r = ui
         .add(egui::Button::new("").selected(on).min_size(egui::vec2(34.0, 24.0)))
-        .on_hover_text("Metronome: start or stop (Space)");
+        .on_hover_text(hover);
     let colour = ui.style().interact_selectable(&r, on).fg_stroke.color;
     metronome_icon(ui.painter(), r.rect, colour);
     if r.clicked() {
-        m.set_on(!on);
+        match silent {
+            Some(s) => *s = !*s,
+            None => m.set_on(!on),
+        }
     }
 }
 
@@ -1051,6 +1633,112 @@ impl TapTempo {
     }
 }
 
+/// The bar's switch between the instrument and the falling notes: filled in the accent colour,
+/// with an icon for where it leads (falling notes, or an instrument's sliders), so it stands
+/// out from the other buttons.
+fn mode_button(ui: &mut egui::Ui, notes_on: bool, label: &str) -> egui::Response {
+    const ACCENT: Color32 = Color32::from_rgb(124, 58, 237);
+    const ACCENT_HOVER: Color32 = Color32::from_rgb(139, 92, 246);
+    let font = egui::FontId::proportional(14.0);
+    let text = ui.painter().layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+    let (icon, pad, h): (f32, f32, f32) = (15.0, 9.0, 24.0);
+    let size = egui::vec2(pad.mul_add(2.0, text.size().x + icon + 6.0), h);
+    let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+    let fill = if r.hovered() { ACCENT_HOVER } else { ACCENT };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 6.0, fill);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(icon.mul_add(0.5, rect.left() + pad), rect.center().y),
+        egui::vec2(icon, icon),
+    );
+    if notes_on {
+        sliders_icon(painter, icon_rect, Color32::WHITE);
+    } else {
+        notes_icon(painter, icon_rect, Color32::WHITE);
+    }
+    let at = egui::pos2(icon_rect.right() + 6.0, rect.center().y - text.size().y / 2.0);
+    painter.galley(at, text, Color32::WHITE);
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Notes falling onto a line: three bars at different heights over a base line.
+fn notes_icon(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let (w, h) = (rect.width(), rect.height());
+    let bar = |x: f32, top: f32, bottom: f32| {
+        egui::Rect::from_min_max(
+            egui::pos2(w.mul_add(x, rect.left()), h.mul_add(top, rect.top())),
+            egui::pos2(w.mul_add(x + 0.22, rect.left()), h.mul_add(bottom, rect.top())),
+        )
+    };
+    for (x, top, bottom) in [(0.04, 0.3, 0.8), (0.39, 0.05, 0.45), (0.74, 0.0, 0.3)] {
+        painter.rect_filled(bar(x, top, bottom), 1.5, colour);
+    }
+    painter.hline(rect.x_range(), rect.bottom() - 0.5, egui::Stroke::new(1.6, colour));
+}
+
+/// An instrument's controls: three sliders with their knobs at different heights.
+fn sliders_icon(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let (w, h) = (rect.width(), rect.height());
+    for (x, knob) in [(0.15, 0.3), (0.5, 0.7), (0.85, 0.45)] {
+        let x = w.mul_add(x, rect.left());
+        painter.vline(x, rect.y_range(), egui::Stroke::new(1.4, colour));
+        painter.circle_filled(egui::pos2(x, h.mul_add(knob, rect.top())), w * 0.13, colour);
+    }
+}
+
+/// A stylised upright piano in `colour`: outlines, with faint fills, on no background.
+fn upright_piano(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let at = |x: f32, y: f32| {
+        egui::pos2(
+            rect.width().mul_add(x, rect.left()),
+            rect.height().mul_add(y, rect.top()),
+        )
+    };
+    let area = |x0, y0, x1, y1| egui::Rect::from_min_max(at(x0, y0), at(x1, y1));
+    let line = egui::Stroke::new(1.5, colour);
+    let thin = egui::Stroke::new(1.0, colour.gamma_multiply(0.7));
+    let face = colour.gamma_multiply(0.12);
+    let shape = |r: egui::Rect, radius: f32, fill: Color32, stroke: egui::Stroke| {
+        painter.rect(r, radius, fill, stroke, egui::StrokeKind::Middle);
+    };
+    // The lid, the upper case with its front panel, the lower case with its panel.
+    shape(area(0.04, 0.0, 0.96, 0.05), 2.0, colour.gamma_multiply(0.3), line);
+    shape(area(0.08, 0.05, 0.92, 0.52), 2.0, face, line);
+    shape(area(0.17, 0.12, 0.83, 0.44), 3.0, Color32::TRANSPARENT, thin);
+    shape(area(0.08, 0.7, 0.92, 0.94), 2.0, face, line);
+    shape(area(0.17, 0.74, 0.83, 0.88), 3.0, Color32::TRANSPARENT, thin);
+    // The keyboard between the cheeks: three octaves of white keys, black keys over them.
+    shape(area(0.02, 0.52, 0.08, 0.7), 1.5, colour.gamma_multiply(0.3), line);
+    shape(area(0.92, 0.52, 0.98, 0.7), 1.5, colour.gamma_multiply(0.3), line);
+    let keys = area(0.08, 0.55, 0.92, 0.68);
+    shape(area(0.08, 0.52, 0.92, 0.55), 0.0, colour.gamma_multiply(0.3), line);
+    shape(keys, 0.0, Color32::TRANSPARENT, line);
+    let whites = 21u8;
+    let white_w = keys.width() / f32::from(whites);
+    for i in 1..whites {
+        let x = white_w.mul_add(f32::from(i), keys.left());
+        painter.vline(x, keys.y_range(), thin);
+    }
+    for i in 1..whites {
+        // A black key after C, D, F, G and A: on the line before white key `i`.
+        if matches!(i % 7, 1 | 2 | 4 | 5 | 6) {
+            let x = white_w.mul_add(f32::from(i), keys.left());
+            let black = egui::Rect::from_min_max(
+                egui::pos2(white_w.mul_add(-0.3, x), keys.top()),
+                egui::pos2(white_w.mul_add(0.3, x), keys.height().mul_add(0.6, keys.top())),
+            );
+            painter.rect_filled(black, 0.5, colour);
+        }
+    }
+    // Two pedals, and the feet.
+    for x in [0.43, 0.52] {
+        shape(area(x, 0.9, x + 0.05, 0.93), 1.0, colour, egui::Stroke::NONE);
+    }
+    for x in [0.06, 0.86] {
+        shape(area(x, 0.94, x + 0.08, 1.0), 1.0, colour.gamma_multiply(0.3), line);
+    }
+}
+
 /// A metronome drawn in `rect`: a tapering body with a pendulum leaning right and its weight.
 fn metronome_icon(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
     let s = rect.height().min(rect.width()) * 0.72;
@@ -1067,6 +1755,13 @@ fn metronome_icon(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
     painter.circle_filled(pivot.lerp(tip, 0.55), s * 0.09, colour);
 }
 
+/// A volume slider from 0 to `max` (1.0 = 100 %), shown and typed as a percentage.
+fn percent_slider(value: &mut f32, max: f32) -> egui::Slider<'_> {
+    egui::Slider::new(value, 0.0..=max)
+        .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
+        .custom_parser(|t| t.trim_end_matches(['%', ' ']).parse::<f64>().ok().map(|v| v / 100.0))
+}
+
 /// The metronome's sound and volume. Changing either plays a sample click.
 fn metronome_options(ui: &mut egui::Ui, m: &Metronome) {
     egui::Grid::new("metronome options")
@@ -1075,11 +1770,7 @@ fn metronome_options(ui: &mut egui::Ui, m: &Metronome) {
         .show(ui, |ui| {
             ui.label("Volume");
             let mut volume = m.volume();
-            let r = ui.add(
-                egui::Slider::new(&mut volume, 0.0..=1.0)
-                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
-                    .custom_parser(|t| t.trim_end_matches(['%', ' ']).parse::<f64>().ok().map(|v| v / 100.0)),
-            );
+            let r = ui.add(percent_slider(&mut volume, 1.0));
             if r.changed() {
                 m.set_volume(volume);
             }
@@ -1268,6 +1959,23 @@ fn ago(ms: i64) -> String {
     }
 }
 
+/// The theme saved as `name`: "light", or else dark (the default).
+fn theme_from_name(name: Option<&str>) -> egui::ThemePreference {
+    if name == Some("light") {
+        egui::ThemePreference::Light
+    } else {
+        egui::ThemePreference::Dark
+    }
+}
+
+/// The name a theme is saved under; `None` for the default, dark.
+const fn theme_name(theme: egui::ThemePreference) -> Option<&'static str> {
+    match theme {
+        egui::ThemePreference::Light => Some("light"),
+        egui::ThemePreference::Dark | egui::ThemePreference::System => None,
+    }
+}
+
 /// Buttons that look like buttons: a fill lighter than the panel, a visible border, a brighter
 /// hover and a darker press.
 fn style_buttons(ctx: &egui::Context) {
@@ -1443,12 +2151,14 @@ fn explain(s: &Section) -> String {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Space starts and stops the metronome, unless a text field has the keyboard.
-        if ctx.input(|i| i.key_pressed(egui::Key::Space))
-            && !ctx.egui_wants_keyboard_input()
-            && let Some(m) = self.session.as_ref().map(Session::metronome)
-        {
-            m.set_on(!m.is_on());
+        // Space starts and stops the metronome, unless a text field has the keyboard. With the
+        // falling notes shown, or a song going on, it starts and stops the song.
+        if ctx.input(|i| i.key_pressed(egui::Key::Space)) && !ctx.egui_wants_keyboard_input() {
+            if self.notes.on || self.running() {
+                self.toggle_run();
+            } else if let Some(m) = self.metronome() {
+                m.set_on(!m.is_on());
+            }
             ctx.request_repaint();
         }
         // T taps the tempo, likewise.
@@ -1483,10 +2193,27 @@ impl eframe::App for App {
         }
         self.record_scale();
         self.follow_pedal();
+        self.take_song(ui.ctx());
+        self.tick_run(ui.ctx());
+        if let Some(e) = self.embedded.borrow_mut().as_mut() {
+            e.set_hidden(self.notes.on);
+        }
         // Bottom panels stack upwards: the keyboard at the very bottom, the chord line, the bar.
         egui::Panel::bottom("keyboard")
             .exact_size(200.0)
             .show(ui, |ui| self.keyboard(ui));
+        if self.notes.on {
+            // The notes fall onto the keys, so the bar and the chord line go to the top. With
+            // the editor hidden, the bar's menus can open over the notes.
+            egui::Panel::top("bar").exact_size(40.0).show(ui, |ui| self.bar(ui));
+            egui::Panel::top("chord")
+                .exact_size(36.0)
+                .show(ui, |ui| self.chord_line(ui));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| self.falling_notes(ui));
+            return;
+        }
         egui::Panel::bottom("chord")
             .exact_size(36.0)
             .show(ui, |ui| self.chord_line(ui));

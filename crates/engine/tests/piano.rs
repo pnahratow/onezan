@@ -29,3 +29,25 @@ fn a_file_that_is_not_a_soundfont_is_refused() {
     assert!(Piano::from_sf2("x", b"RIFF\0\0\0\0not a soundfont").is_err());
     assert!(Piano::from_sf2("x", b"").is_err());
 }
+
+#[test]
+fn the_volume_scales_the_piano() {
+    use common::{on, peak};
+    use onezan_engine::{MAX_PIANO_VOLUME, render_offline};
+    let Some(Instrument::Piano(p)) = piano() else { return };
+    let loudness = |volume: f32| {
+        p.set_volume(volume);
+        let mut i = Instrument::Piano(p.clone());
+        let (l, r) = render_offline(&mut i, 48_000, 24_000, vec![(0, on(60))]).unwrap();
+        peak(&l, &r)
+    };
+    let full = loudness(1.0);
+    assert!(full > 0.01, "sounds at its own level");
+    assert!(
+        (loudness(0.5) / full - 0.5).abs() < 0.02,
+        "half the level at half volume"
+    );
+    assert!(loudness(0.0) < 1e-6, "silent at 0");
+    p.set_volume(10.0);
+    assert!((p.volume() - MAX_PIANO_VOLUME).abs() < f32::EPSILON, "clamped");
+}
