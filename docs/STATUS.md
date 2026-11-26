@@ -34,9 +34,13 @@ postponed. What comes after the release is decided from scratch then. The old no
 
 How each part works: DESIGN.md. Hand checks and release steps: RELEASE.md. Tests: TESTING.md.
 
+## Releases
+
+- **0.2.0** (2026-11-26): the state at the scope reset, tagged as is; the hand checklist in
+  RELEASE.md was not yet gone through for it.
+
 ## Open decisions
 
-- **Version number** of the release (Cargo.toml says 0.1.0; 1.0.0 was the earlier plan).
 - **Which known limits are fine for the release** (the list below), and which must be fixed.
 
 ## Rough edges known
