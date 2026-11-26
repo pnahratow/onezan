@@ -684,6 +684,12 @@ master volume, shared with the voice as an atomic and applied from the next bloc
 `piano_volume` (left out at 100 %); kept while a plugin plays and applied again when the piano
 comes back. Test: `tests/piano.rs` (half volume, half the level; 0 silent; clamped).
 
+**Appearance** (branch `falling-notes`, 2026-11-26): Options has Dark (the default, the user's
+choice) or Light, applied at once with `ctx.set_theme` and saved as `"theme": "light"` (left out
+for dark). It no longer follows the system's setting. The button styling (`style_buttons`)
+covers both themes. The falling-notes area stays dark in both (fixed colours, like piano videos);
+the mode button's violet works on both.
+
 ## Testing (2026-11-25)
 
 `docs/TESTING.md`: the plan (contracts between modules, not insides) and what was done. Run
@@ -695,7 +701,11 @@ comes back. Test: `tests/piano.rs` (half volume, half the level; 0 silent; clamp
 
 The user's idea: use the space the plugin's editor takes for the "falling notes" way of learning
 a piece, as piano videos and games show it, mainly to learn songs from MIDI files. The bar's
-**Notes** button switches the top between the editor (hidden, not closed: X11 unmap /
+mode button (`mode_button`: filled violet, with a drawn icon, right after the pedal light, as the
+switch between the app's two sides) reads **Learn Song** (falling-notes icon) in the instrument's view
+and **Edit instrument** (sliders icon) in the notes view, "Learn Song ▶ 3/20" while a song runs
+behind the instrument's window. Not checked at narrow widths: it is in the bar's left part,
+which is cut off first when the window is narrow. It switches the top between the editor (hidden, not closed: X11 unmap /
 `ShowWindow(SW_HIDE)`) and the notes. In the notes view the bar and the chord line move to the
 top, so the notes fall straight onto the keys.
 
@@ -728,6 +738,13 @@ top, so the notes fall straight onto the keys.
   shows only the song ("Song: name", Close, Open song…). With no song open, the scale chosen falls
   (unmentioned); a scale chosen never replaces an open song. (Two earlier versions had scale and
   song buttons in the strip to switch between them; confusing, two places for the scale.)
+- **The song goes on in the instrument's view**: the run is moved on every frame whichever view
+  is shown (`App::tick_run`), so you can switch to the plugin's window and change its sound while
+  the song keeps playing (and judging the keys, and the app's notes sounding). The bar's button
+  then reads "Learn Song ▶ 3/20"; Space and the metronome button act on the run (start/stop, click
+  on/off) as in the notes view. Checked in a throwaway build: switched views 2 s into a run, the
+  recorded output kept a note on every beat. The window repaints every frame while a run goes
+  (as in the notes view), also with the editor shown.
 - **Wait for me**: no metronome; the notes stop at the line until the chord there is played.
 - **Play the notes** (a checkbox, like "Wait for me"; off by default, saved as `play_notes`; for fun, the point is to hear what you
   play): the app plays the falling notes through the instrument as they reach the line (channel 0,

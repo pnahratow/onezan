@@ -54,6 +54,9 @@ pub struct Settings {
     /// Playing along without hearing the metronome.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub notes_silent: bool,
+    /// "light"; missing: dark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
     /// The built-in piano's volume (1.0: its own level); missing: 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub piano_volume: Option<f32>,
@@ -243,6 +246,7 @@ mod tests {
             wait: true,
             play_notes: true,
             notes_silent: true,
+            theme: Some("light".into()),
             piano_volume: Some(0.7),
             song: Some(PathBuf::from("/songs/Für Elise.mid")),
         }
@@ -267,6 +271,7 @@ mod tests {
             wait: false,
             play_notes: false,
             notes_silent: false,
+            theme: None,
             piano_volume: None,
             song: None,
             ..sample()
