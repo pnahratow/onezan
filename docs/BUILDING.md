@@ -114,5 +114,5 @@ after changing the SVG and commit what it makes:
 | `crates/engine` | MIDI input (`midir`), audio output (`cpal`), lock-free queues (`rtrb`) between them, and offline rendering. |
 | `apps/onezan` | The app: the window (egui) and the command line. |
 
-See `docs/STATUS.md` for decisions, progress and next steps, and `docs/TESTING.md` for how the
-tests are organised.
+See `docs/STATUS.md` for where things stand, `docs/DESIGN.md` for how each part works,
+`docs/TESTING.md` for how the tests are organised and `docs/RELEASE.md` for making a release.

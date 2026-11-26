@@ -1,15 +1,16 @@
 # onezan
 
-**Practice piano scales with your MIDI keyboard.** onezan shows the fingering for every major
-and minor scale on an on-screen keyboard, plays what you play through a real VST3 instrument
-(or its own piano), and keeps track of how much you practiced each scale.
+**Practice piano with your MIDI keyboard.** onezan shows the fingering for every major and
+minor scale on an on-screen keyboard, lets you learn songs from MIDI files as falling notes,
+plays what you play through a real VST3 instrument (or its own piano), and keeps track of how
+much you practiced each scale.
 
 For Linux and Windows. Free and open source (GPL-3.0-or-later).
 
 **[Download the latest release](https://github.com/pnahratow/onezan/releases/latest)**
 
-![onezan playing through Surge XT: E natural minor's fingering on the keyboard, and an E minor
-chord held, named and fingered](docs/screenshot.png)
+![onezan playing through Surge XT, with the synth's own editor in the window: E natural minor's
+fingering on the keyboard, and an E minor chord held, named and fingered](docs/screenshot.png)
 
 ## What it does
 
@@ -20,9 +21,16 @@ chord held, named and fingered](docs/screenshot.png)
 - **Chord names.** Hold a chord and onezan names it (root, type, inversion), with a fingering.
 - **Your sound.** Plays your keyboard through any VST3 instrument you have installed, with its
   own editor in the window. Without one, it uses its built-in piano.
+- **Learn songs with falling notes.** Open a MIDI file (or drop it on the window) and its notes
+  fall onto the keys: play along with the metronome, or let onezan wait until you play each
+  chord. It counts your hits and misses. Without a song, the chosen scale falls, with its
+  fingering.
 - **A metronome**, with a tempo you can tap in.
 - **Practice history.** How long you practiced each scale, and when you last played it.
   Star your favorite scales and instruments to keep them at the top.
+
+![Learn Song: Ode to Joy falls onto the keys, both hands in their own colour; the notes played
+on time light up green, with the score and streak above](docs/screenshot-learn-song.png)
 
 ## It just works
 
@@ -40,7 +48,11 @@ replug it: onezan picks it up. Everything can be changed in the window, but noth
 
 Useful to know:
 
-- **Space** starts and stops the metronome; **T** taps the tempo.
+- **Learn Song** in the bar switches to the falling notes; **Edit instrument** switches back
+  (a song keeps playing while you change the sound).
+- **Space** starts and stops the metronome (in the falling notes: the song); **T** taps the
+  tempo.
+- **Options** has the audio output, MIDI timing, the click's sound and a dark or light theme.
 - You can play the on-screen keyboard with the mouse, and click the **Pedal** light to hold the
   sustain pedal.
 - Hover over anything in the bar to see what onezan chose and why.

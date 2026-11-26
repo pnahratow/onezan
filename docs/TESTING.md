@@ -30,7 +30,7 @@ each improvement means rewriting tests.
 
 ## The contracts, module by module
 
-What exists is marked ✓; the rest is the plan.
+What exists is marked ✓; the rest is open, to do when that part changes next.
 
 ### vst3-host (the plugin host)
 
@@ -40,79 +40,46 @@ What exists is marked ✓; the rest is the plan.
 | Plugin state bytes round-trip and damage is rejected | ✓ `plugin.rs`, `stream.rs` |
 | Class ids print the same on every platform | ✓ `util.rs` |
 | Editor run loop: handlers and timers run, stop when unregistered | ✓ `run_loop.rs` |
-| Scanning: a folder with a broken or non-VST3 bundle gives the others, never an error | new: a temp folder with a fake bundle |
+| Plugin state from an older onezan loads | ✓ `stream.rs` (fixture in `crates/vst3-host/fixtures/`) |
+| Scanning: a folder with a broken or non-VST3 bundle gives the others, never an error | open: a temp folder with a fake bundle |
 
 ### engine
 
 | Contract | Test |
 |---|---|
-| **Instrument** (any): a note at frame N sounds from N (within 1 ms); a released note dies away; the sustain pedal holds and releases; events past the block's end are not lost | ✓ for plugin and piano, as two copies (`tests/plugin.rs`, `tests/piano.rs`) → **one shared suite** run on both |
-| **Callback**: every queued event reaches the voice, at its frame, also when a callback is split into parts; stereo, mono and multichannel outputs are filled correctly; the metronome is mixed in | new, with a fake voice that records what it got (needs the seam below) |
+| **Instrument** (any): a note at frame N sounds from N (within 1 ms); a released note dies away; the sustain pedal holds and releases; a ten-note chord sounds and stops; an event at a block's end is not lost | ✓ one shared suite (`tests/common/mod.rs`, `instrument_contract!`) run on the piano (`tests/piano.rs`) and a plugin (`tests/plugin.rs`) |
+| **Callback**: every queued event reaches the voice, at its frame, also when a callback is split into parts; stereo, mono and multichannel outputs are filled correctly; the metronome is mixed in | ✓ `callback.rs`, with a recording fake behind `callback::Render` |
 | Timing: exact maps arrival times onto the block, immediate puts all at 0; auto switches at 11 ms | ✓ `timing.rs` |
-| Metronome: beats on their sample for any block size, no drift, on/off, volume | ✓ `metronome.rs` |
+| Metronome: beats on their sample for any block size, no drift, on/off, volume; the beat position it publishes; silent clicks keep the time | ✓ `metronome.rs` |
 | MIDI in: the keyboard is picked over loopbacks; a query matches; replugging releases held notes; switching ports releases held notes | ✓ `midi_in.rs`, `tests/midi_hotplug.rs` (Linux) |
-| Audio out: the choice is explained (report) | ✓ partly; the choice of output as a pure function of the outputs found (new) |
-
-**Seam needed:** `Callback` drives `Voice`, an enum. A small trait (`Render`: "process these
-events into these buffers") that `Voice` implements lets the callback run with a test voice. No
-change to how the app behaves.
+| Audio out: the choice is explained (report) | ✓ partly; open: the choice of output as a pure function of the outputs found |
 
 ### app
 
 | Contract | Test |
 |---|---|
 | Fingering tables match their sources and are playable | ✓ `fingering.rs` |
-| Chord names: every root × chord type × inversion is named back as itself; ties settled by the bass | ✓ examples → **exhaustive round trip** (build each chord, read it, compare) |
+| Chord names: every root × chord type × inversion is named back as itself; ties settled by the bass | ✓ `chords.rs`: examples and a round trip over 12 roots × 20 types × every inversion |
 | Chord fingering only where sources agree | ✓ `chords.rs` |
-| **Instrument choice**: asked for → that one or an error; remembered → that one, else automatic; nothing installed or loadable → built-in piano, marked as a stand-in and not remembered; a built-in piano chosen by hand is remembered | new: move the decision out of `plugins::load` / `session::load_instrument` into a plain function over (asked, remembered, what is installed, what loads), then a table of cases |
-| **Keys shown**: per key, velocity (MIDI or mouse), scale tint, scale fingering, a held chord's fingering in place of the scale's, and the outlined style | new: move the per-key decision out of `gui.rs::keyboard` into a plain function, test the combinations |
-| Settings: missing and unknown keys are fine, a broken file is moved aside, unchanged settings are not written | ✓ `settings.rs` → plus **a fixture** of today's file |
-| Practice history: pauses do not count, notes carry their scale, a damaged file is moved aside | ✓ `progress.rs` → plus **a fixture** of today's database (schema `user_version = 1`) |
-| Instrument sound: a damaged, refused or crashed state is moved aside and the default used | new: the file handling in `instrument_state.rs` is testable without a plugin if it takes the save/restore as a function |
-| Startup report: the item used is first and says why; each alternative says why not | ✓ partly (`audio_out.rs`) → one test per section on the facts, not the wording |
+| **Instrument choice**: asked for → that one or an error; remembered → that one, else automatic; nothing installed or loadable → built-in piano, marked as a stand-in and not remembered; a built-in piano chosen by hand is remembered | ✓ `plugins.rs`: `plugins::choose` over a fake `Source`, a table of cases |
+| **Keys shown**: per key, velocity (MIDI or mouse), scale tint, scale fingering, a held chord's fingering in place of the scale's, and the outlined style | ✓ `gui.rs`: `KeyLooks` |
+| Falling notes: a scale or a MIDI file becomes a song (beats, hands); note names spelled by scale degree or key signature; playing along counts notes on time and misses late ones; waiting stops at each chord | ✓ `waterfall.rs` |
+| Settings: missing and unknown keys are fine, a broken file is moved aside, unchanged settings are not written; the 0.1 file loads | ✓ `settings.rs`, fixture in `apps/onezan/fixtures/` |
+| Practice history: pauses do not count, notes carry their scale, a damaged file is moved aside; the 0.1 database loads | ✓ `progress.rs`, fixture in `apps/onezan/fixtures/` |
+| Instrument sound: a damaged, refused or crashed state is moved aside and the default used | open: the file handling in `instrument_state.rs` is testable without a plugin if it takes the save/restore as a function |
+| Startup report: the item used is first and says why; each alternative says why not | ✓ partly (`audio_out.rs`); open: one test per section on the facts, not the wording |
 
 ### Left to hand checks (on purpose)
 
 The window's look and layout, the embedded plugin editor, real audio devices and latency, real
 MIDI hardware, and Windows itself (beyond Wine). These change often or need the real thing;
-tests would be brittle or impossible. STATUS.md lists what was checked by hand and when.
+tests would be brittle or impossible. RELEASE.md has the checklist, done on every release.
 
-## Order of work
+## Running them
 
-Each step is small, stands on its own, and changes no behaviour. Steps 1 to 7 were done on
-2026-11-25 (below, what each became); the tables above still mark the rest as new.
-
-1. **Shared instrument suite**: merge the plugin and piano checks into one set of contract
-   tests, run on the piano (always, when the SoundFont is there) and on a plugin (when installed).
-2. **Callback seam and tests**: the `Render` trait, a recording fake voice, tests for event
-   placement across split callbacks and for channel layouts.
-3. **Instrument choice as a function**, with its table of cases (the newest logic, and the one a
-   change most easily breaks: fallback, remembering, errors).
-4. **Saved-format fixtures**: a settings.json, a progress database and an instrument state
-   written by today's version, in `tests/fixtures/`, loaded by tests.
-5. **Keys shown as a function** in the window, with tests for scale and chord fingering together.
-6. **Chord naming round trip** over all roots, types and inversions.
-7. **One check command**, `build/check.sh`: format, clippy for Linux and Windows, tests on Linux
-   and under Wine; what to run before a commit. (No CI yet; this is the same thing by hand.)
-
-What they became:
-
-1. `crates/engine/tests/common/mod.rs`: `instrument_contract!(make)` writes five tests (a note
-   starts at its own frame, a released note dies away, the pedal holds, a ten-note chord sounds
-   and stops, an event at a block's end is not lost); `tests/piano.rs` and `tests/plugin.rs` use
-   it. Checked by breaking the piano's timing on purpose: the frame test failed.
-2. `callback::Render` (implemented by `Voice`); eight tests in `callback.rs` with a recording
-   fake: order, every source, a flood delayed not lost, exact timing inside the block, a
-   callback split in parts (checked by breaking the part offsets on purpose), mono, stereo and
-   four channels, the metronome, the block size report.
-3. `plugins::choose` over a `Source` (`Installed` for real); five table tests with a fake source.
-4. `apps/onezan/fixtures/` (settings, practice history, with a README) and
-   `crates/vst3-host/fixtures/` (an instrument sound); one test each reads them.
-5. `KeyLooks` in `gui.rs`; four tests (scale alone, chord over it, one hand agreed, no chord).
-6. Three tests over all 12 roots × 20 chord types × every inversion. They found a bug: a minor
-   triad in first inversion was named as a sixth chord without its fifth (Cm/Eb read as Eb6).
-   Only sevenths and ninths may now drop their fifth.
-7. `build/check.sh` (`--quick`: Linux only).
+`build/check.sh` before a commit: formatting, clippy and the tests for Linux and, under Wine,
+Windows (`--quick`: Linux only; CI runs that). Tests that need a plugin, the SoundFont or a
+virtual MIDI port skip without them.
 
 ## Writing a new test
 
