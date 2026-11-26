@@ -58,10 +58,6 @@ impl Kind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the window shows scales going up; the trainer will use both")
-)]
 pub enum Direction {
     Up,
     Down,
@@ -128,6 +124,15 @@ impl Scale {
         // A minor key has three fifths fewer than its tonic major (A minor is C major's signature).
         let minor: i8 = if self.kind == Kind::Major { 0 } else { -3 };
         letter.saturating_add(accidental).saturating_add(minor)
+    }
+
+    /// Where each hand starts for two octaves hands together, as (left, right) MIDI keys: the
+    /// right hand on the root nearest middle C, the left hand two octaves lower, so the hands
+    /// meet on that root (C major: left hand C2 to C4, right hand C4 to C6).
+    pub const fn hand_roots(self) -> (u8, u8) {
+        let root = self.root % 12;
+        let right = if root <= 6 { 60_u8 } else { 48 }.saturating_add(root);
+        (right.saturating_sub(24), right)
     }
 
     /// Whether the pitch class of `key` is in the scale (going up).
@@ -331,9 +336,7 @@ impl Preview {
         };
         if let Self::Scale(s) = self {
             shown.scale = Some(s);
-            let root = s.root % 12;
-            let right_root = if root <= 6 { 60_u8 } else { 48 }.saturating_add(root);
-            let left_root = right_root.saturating_sub(24);
+            let (left_root, right_root) = s.hand_roots();
             for (hand, from, slots) in [
                 (Hand::Left, left_root, &mut shown.left),
                 (Hand::Right, right_root, &mut shown.right),

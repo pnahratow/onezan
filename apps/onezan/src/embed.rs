@@ -28,6 +28,7 @@ pub struct Embedded {
     placed: Option<PixelRect>,
     /// The size of the area last fitted into.
     area: Option<(u32, u32)>,
+    hidden: bool,
 }
 
 impl Embedded {
@@ -51,6 +52,7 @@ impl Embedded {
             size,
             placed: None,
             area: None,
+            hidden: false,
         })
     }
 
@@ -74,6 +76,14 @@ impl Embedded {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Hides the editor (the falling notes take its place) or shows it again.
+    pub fn set_hidden(&mut self, hidden: bool) {
+        if self.hidden != hidden {
+            self.hidden = hidden;
+            self.child.set_visible(!hidden);
         }
     }
 
@@ -152,6 +162,17 @@ impl ChildWindow {
             .width(at.w.max(1))
             .height(at.h.max(1));
         let _ = self.conn.configure_window(self.window, &aux);
+        let _ = self.conn.flush();
+    }
+
+    fn set_visible(&self, visible: bool) {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::ConnectionExt;
+        let _ = if visible {
+            self.conn.map_window(self.window)
+        } else {
+            self.conn.unmap_window(self.window)
+        };
         let _ = self.conn.flush();
     }
 }
@@ -255,6 +276,14 @@ impl ChildWindow {
             );
         }
     }
+
+    fn set_visible(&self, visible: bool) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
+        // SAFETY: our live window, UI thread.
+        unsafe {
+            ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -290,4 +319,6 @@ impl ChildWindow {
     }
 
     fn set_geometry(&self, _at: PixelRect) {}
+
+    fn set_visible(&self, _visible: bool) {}
 }

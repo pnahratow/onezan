@@ -24,7 +24,7 @@ mod report;
 pub mod timing;
 
 pub use audio_out::{AudioOut, Output, REQUESTED_FRAMES, audio_outputs, request_low_latency};
-pub use instrument::{BUILT_IN_PIANO, Instrument, Piano, Voice};
+pub use instrument::{BUILT_IN_PIANO, Instrument, MAX_PIANO_VOLUME, Piano, Voice};
 pub use metronome::{Click, Metronome};
 pub use midi_in::{Keys, MidiChange, MidiWatch, choose_midi_port, midi_input_ports};
 pub use offline::render_offline;

@@ -12,6 +12,10 @@ use std::{fs, io};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches, as the file keeps them"
+)]
 pub struct Settings {
     pub metronome: MetronomeSettings,
     /// The fingering shown, by name ("D major"); missing: none.
@@ -38,6 +42,24 @@ pub struct Settings {
     /// The scales starred in the scales window (by name, "D major"), listed first there.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub favorite_scales: Vec<String>,
+    /// The falling notes are shown in place of the instrument's own window.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notes_view: bool,
+    /// The falling notes wait at the keys until played.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub wait: bool,
+    /// The app plays the falling notes through the instrument.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub play_notes: bool,
+    /// Playing along without hearing the metronome.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notes_silent: bool,
+    /// The built-in piano's volume (1.0: its own level); missing: 1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub piano_volume: Option<f32>,
+    /// The song opened last (a MIDI file); missing: the scale falls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub song: Option<PathBuf>,
 }
 
 /// An audio output: the audio system ("ALSA", "JACK", "WASAPI") and the device's name.
@@ -217,6 +239,12 @@ mod tests {
             midi_timing: Some("exact".into()),
             favorite_instruments: vec!["ABCD".into(), "built-in-piano".into()],
             favorite_scales: vec!["D major".into()],
+            notes_view: true,
+            wait: true,
+            play_notes: true,
+            notes_silent: true,
+            piano_volume: Some(0.7),
+            song: Some(PathBuf::from("/songs/Für Elise.mid")),
         }
     }
 
@@ -235,6 +263,12 @@ mod tests {
             }),
             favorite_instruments: Vec::new(),
             favorite_scales: Vec::new(),
+            notes_view: false,
+            wait: false,
+            play_notes: false,
+            notes_silent: false,
+            piano_volume: None,
+            song: None,
             ..sample()
         };
         assert_eq!(s, expected);

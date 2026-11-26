@@ -95,6 +95,8 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
                         hands, any octaves; the preview the window shows
+  waterfall.rs          falling notes (branch falling-notes): Song (a scale, or a MIDI file via
+                        midly), Run (play along with the metronome, or wait), drawing
   staff.rs              music notation with Bravura (assets/fonts/, SIL OFL 1.1, embedded
                         unchanged: a subset may not keep the name): the clef and key signature
                         in each row of the scales window
@@ -481,6 +483,10 @@ between two different instruments (only one is installed here), with the mouse.
 
 ## Choosing MIDI, audio and timing (2026-11-23)
 
+(Branch `falling-notes`, 2026-11-26: Audio and Timing moved from the bar into the Options
+window, as lists under "Audio output" and "MIDI timing" with what is in use (the report on
+hover), to make room in the bar. The outputs are listed when Options opens. MIDI stays in the bar.)
+
 The bar's MIDI, Audio and Timing values are buttons that open menus (egui popups, opening
 downwards over the keyboard: the editor would cover anything above; long lists scroll). Each
 menu starts with "Automatic", which stays the default; hovering still shows the report.
@@ -672,9 +678,68 @@ this one, and FreePats' YDP Grand, 118 MB, CC-BY) and chose this one.
   building without the file (warning), and with it again (the folder is watched too, as a file
   put back keeps its old time).
 
+**Volume** (branch `falling-notes`, 2026-11-26): Options has a "Built-in piano" volume slider,
+0 to 200 % of the SoundFont's own level (100 % is how it sounded before), through rustysynth's
+master volume, shared with the voice as an atomic and applied from the next block. Saved as
+`piano_volume` (left out at 100 %); kept while a plugin plays and applied again when the piano
+comes back. Test: `tests/piano.rs` (half volume, half the level; 0 silent; clamped).
+
 ## Testing (2026-11-25)
 
 `docs/TESTING.md`: the plan (contracts between modules, not insides) and what was done. Run
 `build/check.sh` before a commit: format, clippy and tests for Linux and, under Wine, Windows
 (`--quick`: Linux only). Saved-file fixtures in `apps/onezan/fixtures/` and
 `crates/vst3-host/fixtures/` must keep loading. 97 tests on Linux at this point.
+
+## Falling notes (branch `falling-notes`, 2026-11-26, experiment)
+
+The user's idea: use the space the plugin's editor takes for the "falling notes" way of learning
+a piece, as piano videos and games show it, mainly to learn songs from MIDI files. The bar's
+**Notes** button switches the top between the editor (hidden, not closed: X11 unmap /
+`ShowWindow(SW_HIDE)`) and the notes. In the notes view the bar and the chord line move to the
+top, so the notes fall straight onto the keys.
+
+- **What falls**: a song opened with "Open song…" (rfd, through the desktop portal on Linux; the
+  dialog runs on its own thread) or dropped on the window; else the scale chosen, two octaves
+  hands together up and down, a note per beat, with its fingering on each note. "Close" by its name goes
+  back to the scale. The song's file, the view and the mode are saved in settings.json
+  (`song`, `notes_view`, `wait`); a song that no longer reads is dropped with the reason shown.
+- **MIDI files** (`Song::from_midi`, the `midly` crate, MIT/Apache, without its rayon feature):
+  every channel but drums; beats from the file's ticks (a quarter note is a beat); tempo changes
+  are not followed, and the first tempo becomes the metronome's when a song is opened. Hands: a
+  part per track (per channel in a one-track file); track names (left/LH/bass, right/RH/treble/
+  melody) decide, else the highest part is the right hand; one part splits at middle C. No
+  fingers for songs.
+- **Play along** (default): Start (or Space in this view) switches the metronome on, counts in four
+  beats, and the notes reach the line on the clicks. The metronome publishes its beat position
+  from the audio callback (`Metronome::beat_now`, a sequence lock; the block is heard about one
+  block after the callback), so drawing follows the clicks, not a UI timer. A note counts when
+  played within 0.15 s of its beat (at most 0.45 beat); late ones turn grey. Score and streak in
+  the strip, a summary at the end.
+- **Click on or off**: in the notes view the bar's metronome button switches the click (lit:
+  heard), not the metronome: playing along needs its time either way. Unheard, it keeps the time
+  (`Metronome::set_silent`: the beat still counts), only while a run plays along in the notes
+  view; elsewhere the button starts and stops the metronome as before. Saved as `notes_silent`.
+  Set before the run switches the metronome on, or its first click sounded (found by
+  recording). Checked by recording: clicks on every beat with it, silence without. (First a
+  "Click" checkbox in the strip; the user wanted the existing button instead.)
+- **The scale is not part of the notes view** (the user's decision): it is chosen only with the
+  bar's Scale button and shows on the keyboard as everywhere, also while a song falls. The strip
+  shows only the song ("Song: name", Close, Open song…). With no song open, the scale chosen falls
+  (unmentioned); a scale chosen never replaces an open song. (Two earlier versions had scale and
+  song buttons in the strip to switch between them; confusing, two places for the scale.)
+- **Wait for me**: no metronome; the notes stop at the line until the chord there is played.
+- **Play the notes** (a checkbox, like "Wait for me"; off by default, saved as `play_notes`; for fun, the point is to hear what you
+  play): the app plays the falling notes through the instrument as they reach the line (channel 0,
+  the file's velocity; scales at 80), and the keyboard shows them pressed. Sent from the frame
+  loop, so within a frame of the beat, not sample-exact. Not judged as the user's playing; stopped
+  notes are released. Checked: keys pressed at the line (screenshot) and sound on every beat after the count-in
+  (system output recorded with `pw-record -P stream.capture.sink=true`). It sounds only while a
+  run goes (Start or Space): as a highlighted button it looked like it would play by itself.
+- Checked in a throwaway build on the host (screenshots, notes through Midi Through): song and
+  scale views, count-in, hits, misses, wrong-key flash, waiting. Space sent with `wtype` did not
+  reach the XWayland window, so Space and the buttons are not yet checked by hand. Not checked:
+  the file dialog, drag and drop, Windows.
+- Ideas not done: tempo changes, a slower practice speed as a percentage, hands separately (the
+  other hand played by the app or muted), looping a passage, fingers from MusicXML, the keys
+  lighting up as their note arrives.

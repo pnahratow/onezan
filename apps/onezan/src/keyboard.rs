@@ -133,6 +133,22 @@ impl Layout {
     }
 }
 
+/// The left and right edge of each key in `range` when the keyboard fills `area`, as [`show`]
+/// lays it out: falling notes line up with their keys.
+pub fn key_spans(area: Rect, range: RangeInclusive<u8>) -> Vec<(u8, f32, f32)> {
+    let Some(layout) = Layout::new(area, range.clone()) else {
+        return Vec::new();
+    };
+    let mut spans: Vec<(u8, f32, f32)> = layout.white_keys().map(|(k, r)| (k, r.left(), r.right())).collect();
+    spans.extend(
+        range
+            .filter(|&k| is_black(k))
+            .filter_map(|k| layout.black_rect(k).map(|r| (k, r.left(), r.right()))),
+    );
+    spans.sort_by_key(|&(k, _, _)| k);
+    spans
+}
+
 /// Draws the keys in `range` filling the available space; `look` says how each key looks.
 /// Returns the key the mouse holds down, if any (dragging slides from key to key).
 pub fn show(ui: &mut Ui, range: RangeInclusive<u8>, look: impl Fn(u8) -> KeyLook) -> Option<u8> {

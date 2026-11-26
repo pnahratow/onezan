@@ -1,0 +1,658 @@
+//! Falling notes: a song or a scale comes down towards the keyboard, each note reaching the
+//! keys when it is to be played, the way piano videos and learning games show music.
+//!
+//! - [`Song`]: the notes, in beats, with the hand that plays each and its finger if known. Made
+//!   from a scale ([`Song::scale`]) or read from a Standard MIDI File ([`Song::from_midi`]).
+//! - [`Run`]: one play through a song. It keeps the clock and judges the keys pressed: in time
+//!   with the metronome (a note counts when played within a short window of its beat), or
+//!   waiting (the notes stop at the keys until they are played).
+//! - [`draw`]: the falling notes over the keyboard's key columns.
+
+use crate::fingering::{Direction, Hand, Scale};
+use crate::keyboard::{LEFT_HAND, RIGHT_HAND, is_black};
+use egui::{Align2, Color32, FontId, Rect, Stroke, StrokeKind, pos2};
+use std::collections::BTreeMap;
+
+/// Beats counted in before the first note.
+pub const COUNT_IN: f64 = 4.0;
+
+/// How many seconds of music the area shows above the keys.
+const SECONDS_SHOWN: f64 = 3.0;
+
+/// A note counts as on time within this much of its beat (or less at fast tempos).
+const ON_TIME_SECS: f64 = 0.15;
+
+/// A note of a song.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Note {
+    pub key: u8,
+    pub hand: Hand,
+    pub finger: Option<u8>,
+    /// When it starts, in beats from the song's start.
+    pub beat: f64,
+    /// How long it is held, in beats.
+    pub len: f64,
+    /// How hard it is struck (1 to 127), when the app plays it.
+    pub velocity: u8,
+}
+
+/// What falls: notes sorted by their beat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Song {
+    pub name: String,
+    pub notes: Vec<Note>,
+    /// The tempo the song was written at, if it says (a MIDI file does).
+    pub bpm: Option<u32>,
+}
+
+impl Song {
+    /// Two octaves hands together, up and down, a note per beat, with its fingering; the hands
+    /// meet on the root nearest middle C, as the keyboard shows it.
+    pub fn scale(s: Scale) -> Self {
+        let (left_root, right_root) = s.hand_roots();
+        let mut notes = Vec::new();
+        for (hand, root) in [(Hand::Left, left_root), (Hand::Right, right_root)] {
+            let up = s.notes(hand, root, 2, Direction::Up);
+            // Down comes highest first; its top note is the last one up, played once.
+            let down = s.notes(hand, root, 2, Direction::Down);
+            let line = up.iter().chain(down.iter().rev().skip(1));
+            for (i, &(key, finger)) in line.enumerate() {
+                let last = i.saturating_add(1) == up.len().saturating_add(down.len()).saturating_sub(1);
+                notes.push(Note {
+                    key,
+                    hand,
+                    finger: Some(finger),
+                    velocity: 80,
+                    beat: f64::from(u32::try_from(i).unwrap_or(u32::MAX)),
+                    len: if last { 2.0 } else { 1.0 },
+                });
+            }
+        }
+        notes.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(a.key.cmp(&b.key)));
+        Self {
+            name: s.name(),
+            notes,
+            bpm: None,
+        }
+    }
+
+    /// Reads a Standard MIDI File. Every channel but the drums (10) counts. Hands: a file with
+    /// a track per hand (as notation programs write piano music) gets them from the track names
+    /// ("left", "LH", "bass", ...) or else from the pitch, the higher track the right hand; with
+    /// one part, notes from middle C up are the right hand's. Tempo changes are not followed:
+    /// the notes stay on their beats, and the first tempo is the song's.
+    ///
+    /// # Errors
+    ///
+    /// When the file is not a MIDI file, or has no notes.
+    pub fn from_midi(bytes: &[u8], name: &str) -> Result<Self, String> {
+        use midly::{MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
+        let smf = Smf::parse(bytes).map_err(|e| format!("not a MIDI file: {e}"))?;
+        // Beats per tick (a quarter note is a beat). Timecode files: at 120 BPM, two beats a second.
+        let per_tick = match smf.header.timing {
+            Timing::Metrical(ppq) => 1.0 / f64::from(ppq.as_int().max(1)),
+            Timing::Timecode(fps, sub) => 2.0 / (f64::from(fps.as_f32()) * f64::from(sub.max(1))),
+        };
+        let mut bpm = None;
+        // Per part: (track or channel, notes); a part is a track, or a channel in a one-track file.
+        let mut parts: BTreeMap<usize, Part> = BTreeMap::new();
+        let one_track = smf.tracks.len() == 1;
+        for (t, track) in smf.tracks.iter().enumerate() {
+            let mut tick: u64 = 0;
+            let mut name_of_track = String::new();
+            // Sounding notes: (channel, key) -> (start beat).
+            let mut open: Vec<(u8, u8, f64, u8)> = Vec::new();
+            for ev in track {
+                tick = tick.saturating_add(u64::from(ev.delta.as_int()));
+                let beat = ticks(tick) * per_tick;
+                match ev.kind {
+                    TrackEventKind::Meta(MetaMessage::Tempo(us)) => {
+                        if bpm.is_none() {
+                            let us = f64::from(us.as_int().max(1));
+                            bpm = Some(60_000_000.0 / us);
+                        }
+                    }
+                    TrackEventKind::Meta(MetaMessage::TrackName(n)) => {
+                        name_of_track = String::from_utf8_lossy(n).into_owned();
+                    }
+                    TrackEventKind::Midi { channel, message } => {
+                        let ch = channel.as_int();
+                        if ch == 9 {
+                            continue;
+                        }
+                        let (key, vel) = match message {
+                            MidiMessage::NoteOn { key, vel } => (key.as_int(), vel.as_int()),
+                            MidiMessage::NoteOff { key, .. } => (key.as_int(), 0),
+                            _ => continue,
+                        };
+                        if let Some(i) = open.iter().position(|&(c, k, _, _)| c == ch && k == key) {
+                            // A note on for a sounding key ends it first.
+                            let (_, _, start, velocity) = open.swap_remove(i);
+                            let id = if one_track { usize::from(ch) } else { t };
+                            let p = parts.entry(id).or_insert_with(|| Part {
+                                name: String::new(),
+                                notes: Vec::new(),
+                            });
+                            if p.name.is_empty() {
+                                p.name.clone_from(&name_of_track);
+                            }
+                            p.notes.push((key, start, beat - start, velocity));
+                        }
+                        if vel > 0 {
+                            open.push((ch, key, beat, vel));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let parts: Vec<Part> = parts.into_values().filter(|p| !p.notes.is_empty()).collect();
+        if parts.is_empty() {
+            return Err("the file has no notes".to_owned());
+        }
+        let hands = assign_hands(&parts);
+        let first = parts
+            .iter()
+            .flat_map(|p| p.notes.iter().map(|&(_, b, _, _)| b))
+            .fold(f64::INFINITY, f64::min);
+        // Start on the beat the first note is in, keeping the notes' place in the beat.
+        let shift = first.floor();
+        let mut notes: Vec<Note> = parts
+            .iter()
+            .zip(hands)
+            .flat_map(|(p, hand)| {
+                p.notes.iter().map(move |&(key, beat, len, velocity)| Note {
+                    key,
+                    hand: hand.unwrap_or(if key >= 60 { Hand::Right } else { Hand::Left }),
+                    finger: None,
+                    velocity,
+                    beat: beat - shift,
+                    len: len.max(0.05),
+                })
+            })
+            .collect();
+        notes.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(a.key.cmp(&b.key)));
+        Ok(Self {
+            name: name.to_owned(),
+            notes,
+            bpm: bpm.map(|b: f64| {
+                let b = b.round().clamp(1.0, 1000.0);
+                (1..=1000u32).find(|&n| f64::from(n) >= b).unwrap_or(120)
+            }),
+        })
+    }
+
+    /// The notes that start, and those that end, after `from` and up to `to` (beats): what to
+    /// play as the song moves on. Each as (key, velocity).
+    pub fn between(&self, from: f64, to: f64) -> (Vec<(u8, u8)>, Vec<u8>) {
+        let within = |b: f64| from < b && b <= to;
+        let starts = self
+            .notes
+            .iter()
+            .filter(|n| within(n.beat))
+            .map(|n| (n.key, n.velocity))
+            .collect();
+        let ends = self
+            .notes
+            .iter()
+            .filter(|n| within(n.beat + n.len))
+            .map(|n| n.key)
+            .collect();
+        (starts, ends)
+    }
+
+    /// When the last note ends, in beats.
+    pub fn end(&self) -> f64 {
+        self.notes.iter().map(|n| n.beat + n.len).fold(0.0, f64::max)
+    }
+}
+
+/// A tick count as f64 (exact up to 2^53, far beyond any song).
+fn ticks(t: u64) -> f64 {
+    let (hi, lo) = (
+        u32::try_from(t >> 32).unwrap_or(u32::MAX),
+        u32::try_from(t & 0xffff_ffff).unwrap_or(0),
+    );
+    f64::from(hi).mul_add(4_294_967_296.0, f64::from(lo))
+}
+
+/// The notes of one track (or channel) of a MIDI file: (key, beat, length).
+struct Part {
+    name: String,
+    notes: Vec<(u8, f64, f64, u8)>,
+}
+
+/// Which hand plays each part: by its name, else the highest part the right hand and the
+/// others the left; `None` (split at middle C) when there is only one part.
+fn assign_hands(parts: &[Part]) -> Vec<Option<Hand>> {
+    let named = |p: &Part| {
+        let n = p.name.to_lowercase();
+        let has = |w: &[&str]| {
+            w.iter()
+                .any(|w| n.split(|c: char| !c.is_alphanumeric()).any(|x| x == *w))
+        };
+        if has(&["left", "lh", "bass", "links", "l"]) {
+            Some(Hand::Left)
+        } else if has(&["right", "rh", "treble", "melody", "rechts", "r"]) {
+            Some(Hand::Right)
+        } else {
+            None
+        }
+    };
+    if parts.len() == 1 {
+        return parts.iter().map(named).collect();
+    }
+    let mean = |p: &Part| {
+        let sum: f64 = p.notes.iter().map(|&(k, _, _, _)| f64::from(k)).sum();
+        sum / f64::from(u32::try_from(p.notes.len().max(1)).unwrap_or(u32::MAX))
+    };
+    let highest = parts
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| mean(a).total_cmp(&mean(b)))
+        .map(|(i, _)| i);
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| named(p).or_else(|| Some(if Some(i) == highest { Hand::Right } else { Hand::Left })))
+        .collect()
+}
+
+/// How a note went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Coming,
+    Hit,
+    Missed,
+}
+
+/// One play through a song.
+pub struct Run {
+    pub song: Song,
+    status: Vec<Status>,
+    /// The notes wait at the keys until played; otherwise they keep the metronome's time.
+    pub wait: bool,
+    /// The song's beat now (negative while counting in).
+    beat: f64,
+    /// Play along: the metronome beat at the song's beat 0, once the metronome has clicked.
+    origin: Option<f64>,
+    pub streak: u32,
+    pub best_streak: u32,
+    /// Keys played right and wrong, with when (seconds, the window's clock), for a flash.
+    pub flashes: Vec<(u8, bool, f64)>,
+}
+
+impl Run {
+    pub fn new(song: Song, wait: bool) -> Self {
+        Self {
+            status: vec![Status::Coming; song.notes.len()],
+            song,
+            wait,
+            beat: -COUNT_IN,
+            origin: None,
+            streak: 0,
+            best_streak: 0,
+            flashes: Vec::new(),
+        }
+    }
+
+    pub const fn beat(&self) -> f64 {
+        self.beat
+    }
+
+    pub fn status(&self, i: usize) -> Status {
+        self.status.get(i).copied().unwrap_or(Status::Coming)
+    }
+
+    /// Notes played on time, and all notes.
+    pub fn score(&self) -> (usize, usize) {
+        (
+            self.status.iter().filter(|&&s| s == Status::Hit).count(),
+            self.status.len(),
+        )
+    }
+
+    /// Played through: a beat after the last note ends.
+    pub fn finished(&self) -> bool {
+        self.beat > self.song.end() + 1.0
+    }
+
+    /// Moves the clock on. Play along: to the metronome's beat (`None`: not clicking yet, the
+    /// song waits at its count-in). Waiting: by `beats`, but not past a note not yet played.
+    pub fn advance(&mut self, metronome: Option<f64>, beats: f64, bpm: f64) {
+        if self.wait {
+            let next = self.next_step();
+            let to = self.beat + beats.max(0.0);
+            self.beat = next.map_or(to, |n| to.min(n));
+        } else if let Some(m) = metronome {
+            // The song starts COUNT_IN beats after the next click.
+            let origin = *self.origin.get_or_insert_with(|| m.max(0.0).ceil() + COUNT_IN);
+            self.beat = m - origin;
+            let late = window(bpm);
+            for (i, n) in self.song.notes.iter().enumerate() {
+                if n.beat >= self.beat - late {
+                    break;
+                }
+                if let Some(s) = self.status.get_mut(i)
+                    && *s == Status::Coming
+                {
+                    *s = Status::Missed;
+                    self.streak = 0;
+                }
+            }
+        }
+    }
+
+    /// The beat of the first note not yet played (waiting).
+    fn next_step(&self) -> Option<f64> {
+        self.song
+            .notes
+            .iter()
+            .zip(&self.status)
+            .find(|(_, s)| **s == Status::Coming)
+            .map(|(n, _)| n.beat)
+    }
+
+    /// `key` was pressed now (`time`: the window's clock, for the flash). Returns whether it
+    /// played a note.
+    pub fn press(&mut self, key: u8, bpm: f64, time: f64) -> bool {
+        let beat = self.beat;
+        let found = if self.wait {
+            // A note of the next chord (the notes starting together), from a beat before it.
+            self.next_step().filter(|&step| beat >= step - 1.0).and_then(|step| {
+                self.song
+                    .notes
+                    .iter()
+                    .zip(&self.status)
+                    .position(|(n, s)| *s == Status::Coming && n.key == key && (n.beat - step).abs() < 0.05)
+            })
+        } else {
+            let w = window(bpm);
+            self.song
+                .notes
+                .iter()
+                .zip(&self.status)
+                .enumerate()
+                .filter(|(_, (n, s))| **s == Status::Coming && n.key == key && (n.beat - beat).abs() <= w)
+                .min_by(|(_, (a, _)), (_, (b, _))| (a.beat - beat).abs().total_cmp(&(b.beat - beat).abs()))
+                .map(|(i, _)| i)
+        };
+        let hit = found.and_then(|i| self.status.get_mut(i)).is_some_and(|s| {
+            *s = Status::Hit;
+            true
+        });
+        if hit {
+            self.streak = self.streak.saturating_add(1);
+            self.best_streak = self.best_streak.max(self.streak);
+        } else if beat > -1.0 {
+            // Before the count-in ends a key is just a key.
+            self.streak = 0;
+        }
+        self.flashes.retain(|&(_, _, t)| time - t < FLASH_SECS);
+        self.flashes.push((key, hit, time));
+        hit
+    }
+}
+
+/// How far from its beat a note still counts, in beats.
+fn window(bpm: f64) -> f64 {
+    (ON_TIME_SECS * bpm / 60.0).min(0.45)
+}
+
+const FLASH_SECS: f64 = 0.35;
+
+const BACKGROUND: Color32 = Color32::from_rgb(24, 24, 30);
+const OCTAVE_LINE: Color32 = Color32::from_rgb(52, 52, 62);
+const FIFTH_LINE: Color32 = Color32::from_rgb(36, 36, 44);
+const BEAT_LINE: Color32 = Color32::from_rgb(34, 34, 42);
+const HIT_LINE: Color32 = Color32::from_rgb(190, 190, 205);
+const HIT: Color32 = Color32::from_rgb(74, 222, 128);
+const WRONG: Color32 = Color32::from_rgb(239, 68, 68);
+const MISSED: Color32 = Color32::from_rgb(78, 78, 88);
+
+/// Mixes `c` towards `to` by `t` (0 to 1).
+fn mix(c: Color32, to: Color32, t: f32) -> Color32 {
+    let m = |a: u8, b: u8| {
+        let v = (f32::from(b) - f32::from(a)).mul_add(t, f32::from(a));
+        (0..=255u8).find(|&n| f32::from(n) >= v.round()).unwrap_or(255)
+    };
+    Color32::from_rgb(m(c.r(), to.r()), m(c.g(), to.g()), m(c.b(), to.b()))
+}
+
+/// Draws `song` falling into `area` at the song's `beat`, over the key columns `spans` (from
+/// [`crate::keyboard::key_spans`]); the keys are just below the area's bottom edge. `run` gives
+/// each note's status; `time` (the window's clock, seconds) fades the flashes.
+#[expect(clippy::too_many_arguments, reason = "one drawing call with its inputs")]
+pub fn draw(
+    painter: &egui::Painter,
+    area: Rect,
+    spans: &[(u8, f32, f32)],
+    song: &Song,
+    run: Option<&Run>,
+    beat: f64,
+    bpm: f64,
+    time: f64,
+) {
+    painter.rect_filled(area, 0.0, BACKGROUND);
+    let line = area.bottom();
+    let shown = (SECONDS_SHOWN * bpm / 60.0).max(3.0);
+    let per_beat = f64::from(area.height()) / shown;
+    // Screen y of a song beat.
+    let y = |b: f64| {
+        let v = (beat - b).mul_add(per_beat, f64::from(line));
+        #[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+        #[expect(clippy::as_conversions, reason = "no as-free f64 to f32 conversion")]
+        let v = v.clamp(-1e6, 1e6) as f32;
+        v
+    };
+    let span = |key: u8| spans.iter().find(|&&(k, _, _)| k == key).map(|&(_, l, r)| (l, r));
+
+    // Lines between octaves (B|C) and at E|F, like the gaps between groups of black keys.
+    for &(key, left, _) in spans {
+        let colour = match key % 12 {
+            0 => OCTAVE_LINE,
+            5 => FIFTH_LINE,
+            _ => continue,
+        };
+        painter.vline(left, area.y_range(), Stroke::new(1.0, colour));
+    }
+    // A faint line on every beat.
+    let first = beat.floor();
+    for i in 0..=200u32 {
+        let b = first + f64::from(i);
+        if b > beat + shown + 1.0 {
+            break;
+        }
+        painter.hline(area.x_range(), y(b), Stroke::new(1.0, BEAT_LINE));
+    }
+
+    for (i, n) in song.notes.iter().enumerate() {
+        if n.beat > beat + shown + 0.1 {
+            break;
+        }
+        if n.beat + n.len < beat - 0.1 {
+            continue;
+        }
+        let Some((left, right)) = span(n.key) else { continue };
+        let pad = ((right - left) * 0.08).max(1.0);
+        let rect = Rect::from_min_max(
+            pos2(left + pad, y(n.beat + n.len) + 1.0),
+            pos2(right - pad, y(n.beat) - 1.0),
+        );
+        let hand = match n.hand {
+            Hand::Left => LEFT_HAND,
+            Hand::Right => RIGHT_HAND,
+        };
+        let base = if is_black(n.key) {
+            mix(hand, Color32::BLACK, 0.3)
+        } else {
+            hand
+        };
+        let status = run.map_or(Status::Coming, |r| r.status(i));
+        let (fill, edge) = match status {
+            Status::Coming => (base, mix(base, Color32::WHITE, 0.35)),
+            Status::Hit => (mix(base, HIT, 0.55), Color32::WHITE),
+            Status::Missed => (MISSED, mix(hand, MISSED, 0.4)),
+        };
+        let radius = (rect.width() * 0.25).min(6.0);
+        painter.rect_filled(rect, radius, fill);
+        painter.rect_stroke(rect, radius, Stroke::new(1.0, edge), StrokeKind::Inside);
+        if let Some(finger) = n.finger
+            && rect.width() >= 10.0
+            && rect.height() >= 14.0
+        {
+            let size = (rect.width() * 0.6).clamp(9.0, 16.0);
+            painter.text(
+                pos2(rect.center().x, rect.bottom() - 3.0),
+                Align2::CENTER_BOTTOM,
+                finger.to_string(),
+                FontId::proportional(size),
+                Color32::WHITE,
+            );
+        }
+    }
+
+    // The line the notes fall onto, lit where a key was just played.
+    painter.hline(area.x_range(), line - 1.5, Stroke::new(3.0, HIT_LINE));
+    for &(key, hit, at) in run.map_or(&[][..], |r| r.flashes.as_slice()) {
+        let age = time - at;
+        let Some((left, right)) = span(key).filter(|_| (0.0..FLASH_SECS).contains(&age)) else {
+            continue;
+        };
+        #[expect(clippy::cast_possible_truncation, reason = "an opacity")]
+        #[expect(clippy::as_conversions, reason = "no as-free f64 to f32 conversion")]
+        let fade = (1.0 - age / FLASH_SECS) as f32;
+        let colour = if hit { HIT } else { WRONG };
+        let glow = Rect::from_min_max(pos2(left, (-40.0f32).mul_add(fade, line)), pos2(right, line));
+        painter.rect_filled(glow, 2.0, colour.gamma_multiply(0.35 * fade));
+        painter.hline(left..=right, line - 1.5, Stroke::new(4.0, colour.gamma_multiply(fade)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fingering::Kind;
+
+    fn c_major() -> Song {
+        Song::scale(Scale {
+            root: 0,
+            kind: Kind::Major,
+        })
+    }
+
+    #[test]
+    fn a_scale_goes_up_and_down_two_octaves_hands_together() {
+        let s = c_major();
+        let right: Vec<u8> = s
+            .notes
+            .iter()
+            .filter(|n| n.hand == Hand::Right)
+            .map(|n| n.key)
+            .collect();
+        assert_eq!(right.len(), 29);
+        assert_eq!(right.first(), Some(&60));
+        assert_eq!(right.get(14), Some(&84), "the top, once");
+        assert_eq!(right.get(15), Some(&83));
+        assert_eq!(right.last(), Some(&60));
+        let left_first = s.notes.iter().find(|n| n.hand == Hand::Left).unwrap();
+        assert_eq!((left_first.key, left_first.beat, left_first.finger), (36, 0.0, Some(5)));
+        assert!((s.end() - 30.0).abs() < 1e-9, "the last note held two beats");
+    }
+
+    /// A one-track format-0 file: tempo 100 BPM, 480 ticks a beat, C4 and E4 a beat each with
+    /// a beat's rest first, and a drum note that is left out.
+    fn small_midi() -> Vec<u8> {
+        let mut track = vec![
+            0x00, 0xFF, 0x51, 0x03, 0x09, 0x27, 0xC0, // tempo 600 000 µs: 100 BPM
+            0x83, 0x60, 0x90, 60, 100, // after 480 ticks: C4 on
+            0x00, 0x99, 36, 100, // drum
+            0x83, 0x60, 0x80, 60, 0, // C4 off
+            0x00, 0x90, 64, 90, // E4 on
+            0x83, 0x60, 0x90, 64, 0, // E4 off (velocity 0)
+            0x00, 0xFF, 0x2F, 0x00,
+        ];
+        let mut f = b"MThd\0\0\0\x06\0\0\0\x01\x01\xE0MTrk".to_vec();
+        f.extend_from_slice(&u32::try_from(track.len()).unwrap().to_be_bytes());
+        f.append(&mut track);
+        f
+    }
+
+    #[test]
+    fn a_midi_file_gives_its_notes_on_their_beats() {
+        let s = Song::from_midi(&small_midi(), "test").unwrap();
+        assert_eq!(s.bpm, Some(100));
+        let notes: Vec<(u8, f64, f64)> = s.notes.iter().map(|n| (n.key, n.beat, n.len)).collect();
+        // Starting on the beat of the first note.
+        assert_eq!(notes, [(60, 0.0, 1.0), (64, 1.0, 1.0)]);
+        assert!(s.notes.iter().all(|n| n.hand == Hand::Right), "middle C and up");
+        assert_eq!(s.notes.iter().map(|n| n.velocity).collect::<Vec<_>>(), [100, 90]);
+        assert!(Song::from_midi(b"nope", "x").is_err());
+    }
+
+    #[test]
+    fn the_notes_to_play_as_the_song_moves_on() {
+        let s = c_major();
+        // Beat 0: both hands start; nothing ends.
+        let (starts, ends) = s.between(-0.5, 0.0);
+        assert_eq!(starts, [(36, 80), (60, 80)]);
+        assert_eq!(ends, [0u8; 0], "nothing ends");
+        // Beat 1: the first notes end as the next ones start.
+        let (starts, ends) = s.between(0.9, 1.0);
+        assert_eq!(starts, [(38, 80), (62, 80)]);
+        assert_eq!(ends, [36, 60]);
+        assert_eq!(s.between(0.2, 0.8), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn hands_come_from_track_names_or_pitch() {
+        let p = |name: &str, key| Part {
+            name: name.to_owned(),
+            notes: vec![(key, 0.0, 1.0, 64)],
+        };
+        assert_eq!(
+            assign_hands(&[p("Piano", 40), p("Piano", 70)]),
+            [Some(Hand::Left), Some(Hand::Right)]
+        );
+        assert_eq!(
+            assign_hands(&[p("Right Hand", 40), p("LH", 70)]),
+            [Some(Hand::Right), Some(Hand::Left)]
+        );
+        assert_eq!(assign_hands(&[p("Piano", 40)]), [None]);
+    }
+
+    #[test]
+    fn playing_along_counts_notes_on_time_and_misses_late_ones() {
+        let mut r = Run::new(c_major(), false);
+        let bpm = 60.0; // a beat a second: on time within 0.15 beats
+        r.advance(None, 0.0, bpm);
+        assert!((r.beat() + COUNT_IN).abs() < 1e-9, "waits for the metronome");
+        // The metronome clicked beat 0 just now: the song starts four beats on.
+        r.advance(Some(0.0), 0.0, bpm);
+        r.advance(Some(4.1), 0.0, bpm);
+        assert!(r.press(60, bpm, 0.0), "right hand C4, a little late");
+        assert!(!r.press(62, bpm, 0.0), "D4 is not due yet");
+        assert_eq!(r.streak, 0, "a wrong key ends the streak");
+        r.advance(Some(4.9), 0.0, bpm);
+        assert!(r.press(62, bpm, 0.0), "D4, a little early");
+        r.advance(Some(6.0), 0.0, bpm);
+        // The left hand's first two notes were never played.
+        assert_eq!(r.status(0), Status::Missed);
+        assert_eq!(r.score(), (2, 58));
+    }
+
+    #[test]
+    fn waiting_stops_at_each_chord_until_it_is_played() {
+        let mut r = Run::new(c_major(), true);
+        r.advance(None, 10.0, 60.0);
+        assert!(r.beat().abs() < 1e-9, "stops at the first notes");
+        assert!(r.press(60, 60.0, 0.0));
+        r.advance(None, 10.0, 60.0);
+        assert!(r.beat().abs() < 1e-9, "the left hand's C2 is still to play");
+        assert!(r.press(36, 60.0, 0.0));
+        r.advance(None, 0.5, 60.0);
+        assert!((r.beat() - 0.5).abs() < 1e-9, "on again");
+        assert!(r.press(62, 60.0, 0.0), "the next chord, played early");
+        assert_eq!(r.best_streak, 3);
+    }
+}
