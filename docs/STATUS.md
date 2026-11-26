@@ -678,8 +678,10 @@ this one, and FreePats' YDP Grand, 118 MB, CC-BY) and chose this one.
   building without the file (warning), and with it again (the folder is watched too, as a file
   put back keeps its old time).
 
-**Volume** (branch `falling-notes`, 2026-11-26): Options has a "Built-in piano" volume slider,
-0 to 200 % of the SoundFont's own level (100 % is how it sounded before), through rustysynth's
+**Volume** (branch `falling-notes`, 2026-11-26): the built-in piano's page (in place of a
+plugin's window: `piano_page`) shows a drawn upright piano (`upright_piano`: outlines in the
+text's grey, faint fills, no background; both themes), its name and credit, and a volume slider,
+(first in Options; moved here by the user's choice), 0 to 200 % of the SoundFont's own level (100 % is how it sounded before), through rustysynth's
 master volume, shared with the voice as an atomic and applied from the next block. Saved as
 `piano_volume` (left out at 100 %); kept while a plugin plays and applied again when the piano
 comes back. Test: `tests/piano.rs` (half volume, half the level; 0 silent; clamped).
@@ -726,10 +728,11 @@ top, so the notes fall straight onto the keys.
   block after the callback), so drawing follows the clicks, not a UI timer. A note counts when
   played within 0.15 s of its beat (at most 0.45 beat); late ones turn grey. Score and streak in
   the strip, a summary at the end.
-- **Click on or off**: in the notes view the bar's metronome button switches the click (lit:
+- **Click on or off**: with a song open, in the notes view the bar's metronome button switches the click (lit:
   heard), not the metronome: playing along needs its time either way. Unheard, it keeps the time
   (`Metronome::set_silent`: the beat still counts), only while a run plays along in the notes
-  view; elsewhere the button starts and stops the metronome as before. Saved as `notes_silent`.
+  view; elsewhere, and whenever no song is open, the button starts and stops the metronome
+  as before (and the click is never silenced). Saved as `notes_silent`.
   Set before the run switches the metronome on, or its first click sounded (found by
   recording). Checked by recording: clicks on every beat with it, silence without. (First a
   "Click" checkbox in the strip; the user wanted the existing button instead.)
@@ -745,6 +748,18 @@ top, so the notes fall straight onto the keys.
   on/off) as in the notes view. Checked in a throwaway build: switched views 2 s into a run, the
   recorded output kept a note on every beat. The window repaints every frame while a run goes
   (as in the notes view), also with the editor shown.
+- **Note names** on the falling notes, at the bottom (above the finger for a scale): a scale's
+  notes are spelled by degree (`Scale::letter`: F# major's seventh is E#, Db major has Gb), a
+  song's by the MIDI file's first key signature (flats or sharps; `chords::letter_of`), without
+  one the usual names (Db Eb F# Ab Bb). Written with # and b like the chord line. Tests in
+  `waterfall.rs`.
+- **The song's key** next to its name ("C major", dimmed), when the file gives one: its first
+  key signature (`Song::key`, `Key::name`). Optional in MIDI files: notation programs write it,
+  recordings and DAW exports often not (or a default C major that may be wrong); nothing is shown
+  then. Not guessed from the notes (possible later). Key changes later in a song are not shown.
+  The key is a toggle button: a click selects its scale (`Key::scale`: major, or natural minor),
+  shown on the keys as any scale chosen in the bar; it is lit while that scale is selected, and
+  a click then clears the scale.
 - **Wait for me**: no metronome; the notes stop at the line until the chord there is played.
 - **Play the notes** (a checkbox, like "Wait for me"; off by default, saved as `play_notes`; for fun, the point is to hear what you
   play): the app plays the falling notes through the instrument as they reach the line (channel 0,

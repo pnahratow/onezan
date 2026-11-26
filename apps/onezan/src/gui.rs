@@ -400,6 +400,7 @@ impl App {
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
+        let (notes_label, running) = (self.mode_label(), self.running());
         let (session, midi, keys, preview) = (self.session.as_ref(), &self.midi, &self.keys, self.preview);
         let lists = &mut self.menus;
         let (mut pick, mut pedal_clicked) = (None, false);
@@ -410,18 +411,10 @@ impl App {
         );
         let metronome = session.map(|s| Arc::clone(s.metronome()));
         let tap = &mut self.tap;
-        let running = self.notes.run.as_ref().filter(|r| !r.finished());
-        let notes_label = match running {
-            // Shown while the plugin's window is: the song goes on.
-            Some(r) if !self.notes.on => {
-                let (hit, all) = r.score();
-                format!("Learn Song ▶ {hit}/{all}")
-            }
-            _ if self.notes.on => "Edit instrument".to_owned(),
-            _ => "Learn Song".to_owned(),
-        };
-        let running = running.is_some();
         let notes_view = self.notes.on;
+        // With a song open, the metronome button switches the click (the song needs the
+        // metronome's time); without one it starts and stops the metronome as ever.
+        let has_song = self.notes.song.is_some();
         let mut switch_view = false;
         let silent = &mut self.notes.silent;
         // The left part gives way (truncated) when the window is narrow; the picker stays whole.
@@ -487,7 +480,12 @@ impl App {
                     .on_hover_text("Choose the scale whose fingering the keyboard shows, in a window of its own");
                 if let Some(m) = &metronome {
                     ui.separator();
-                    metronome_controls(ui, m, tap, (notes_view || running).then_some(&mut *silent));
+                    metronome_controls(
+                        ui,
+                        m,
+                        tap,
+                        (has_song && (notes_view || running)).then_some(&mut *silent),
+                    );
                 }
             },
         );
@@ -540,10 +538,9 @@ impl App {
         let builder = egui::ViewportBuilder::default()
             .with_title("onezan options")
             .with_app_id("onezan")
-            .with_inner_size([420.0, 620.0]);
+            .with_inner_size([420.0, 560.0]);
         let size = &mut self.options_size;
         let (session, audio_note, lists) = (self.session.as_ref(), self.audio_note.as_deref(), &mut self.menus);
-        let piano_volume = &mut self.piano_volume;
         let theme = &mut self.theme;
         let mut pick = None;
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("options"), builder, |ui, _| {
@@ -563,25 +560,6 @@ impl App {
                     }
                 }
                 let Some(s) = session else { return };
-                ui.add_space(12.0);
-                ui.heading("Built-in piano");
-                if let Some(p) = s.instrument().piano() {
-                    ui.horizontal(|ui| {
-                        ui.label("Volume");
-                        let r = ui.add(
-                            egui::Slider::new(piano_volume, 0.0..=onezan_engine::MAX_PIANO_VOLUME)
-                                .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
-                                .custom_parser(|t| {
-                                    t.trim_end_matches(['%', ' ']).parse::<f64>().ok().map(|v| v / 100.0)
-                                }),
-                        );
-                        if r.changed() {
-                            p.set_volume(*piano_volume);
-                        }
-                    });
-                } else {
-                    ui.label(RichText::new("Not playing now. A plugin has its own volume in its window.").weak());
-                }
                 let in_use = |label| {
                     s.section(label)
                         .map_or_else(String::new, |sec: &Section| sec.short.clone())
@@ -865,23 +843,14 @@ impl App {
         self.placeholder(ui);
     }
 
-    fn placeholder(&self, ui: &mut egui::Ui) {
+    fn placeholder(&mut self, ui: &mut egui::Ui) {
+        if self.error.is_none() && self.session.as_ref().is_some_and(|s| s.instrument().piano().is_some()) {
+            self.piano_page(ui);
+            return;
+        }
         ui.centered_and_justified(|ui| match (&self.session, &self.error) {
             (_, Some(e)) => {
                 ui.label(RichText::new(e).color(Color32::from_rgb(239, 68, 68)));
-            }
-            (Some(s), None) if s.instrument().plugin().is_none() => {
-                let mut text = format!(
-                    "{}\n\nFreePats \"Upright Piano KW\", a Kawai upright piano (public domain).",
-                    crate::piano::NAME
-                );
-                if s.is_fallback() {
-                    text.push_str(
-                        "\nNo VST3 instrument could be loaded. Install one and choose it under Instrument \
-                         for other sounds.",
-                    );
-                }
-                ui.label(RichText::new(text).weak());
             }
             (Some(s), None) => {
                 let name = s.section("plugin").map_or("", |p| p.short.as_str());
@@ -889,6 +858,54 @@ impl App {
                 ui.label(RichText::new(format!("{name}\n\nIts own window cannot be shown here: {why}")).weak());
             }
             (None, None) => {}
+        });
+    }
+
+    /// The built-in piano's page in place of a plugin's window: a drawing of an upright piano,
+    /// what it is, and its volume.
+    fn piano_page(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.session.as_ref() else { return };
+        let Some(piano) = s.instrument().piano() else { return };
+        let fallback = s.is_fallback();
+        let volume = &mut self.piano_volume;
+        let grey = ui.visuals().weak_text_color();
+        let free = ui.available_height();
+        ui.vertical_centered(|ui| {
+            // The drawing, name, credit and slider together, about 330 points high, centred.
+            let size = egui::vec2(220.0, 190.0);
+            let height = if fallback { 370.0 } else { 330.0 };
+            ui.add_space(((free - height) / 2.0).max(8.0));
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            upright_piano(ui.painter(), rect, grey);
+            ui.add_space(16.0);
+            ui.label(RichText::new(crate::piano::NAME).size(18.0).color(grey));
+            ui.label(RichText::new("FreePats \"Upright Piano KW\", a Kawai upright piano (public domain)").weak());
+            if fallback {
+                ui.label(
+                    RichText::new(
+                        "No VST3 instrument could be loaded. Install one and choose it under Instrument for \
+                         other sounds.",
+                    )
+                    .weak(),
+                );
+            }
+            ui.add_space(16.0);
+            // A row of its own, centred under the text (a slider alone keeps to the left).
+            let row = egui::Rect::from_center_size(
+                egui::pos2(ui.max_rect().center().x, ui.cursor().top() + 12.0),
+                egui::vec2(280.0, 24.0),
+            );
+            ui.spacing_mut().slider_width = 170.0;
+            let r = ui.put(
+                row,
+                egui::Slider::new(volume, 0.0..=onezan_engine::MAX_PIANO_VOLUME)
+                    .text("Volume")
+                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
+                    .custom_parser(|t| t.trim_end_matches(['%', ' ']).parse::<f64>().ok().map(|v| v / 100.0)),
+            );
+            if r.changed() {
+                piano.set_volume(*volume);
+            }
         });
     }
 
@@ -1004,7 +1021,7 @@ impl App {
         if !wait && let Some(m) = self.session.as_ref().map(Session::metronome) {
             self.notes.started_metronome = !m.is_on();
             // Before it starts, or its first click would sound.
-            m.set_silent(self.notes.silent);
+            m.set_silent(self.notes.song.is_some() && self.notes.silent);
             m.set_on(true);
         }
         self.notes.run = Some(Run::new(song, wait));
@@ -1140,6 +1157,19 @@ impl App {
     }
 
     /// The top in the notes view: the controls, and the notes falling onto the keys.
+    /// The mode button's text: where it leads, and the score while a song goes on behind the
+    /// plugin's window.
+    fn mode_label(&self) -> String {
+        match self.notes.run.as_ref().filter(|r| !r.finished()) {
+            Some(r) if !self.notes.on => {
+                let (hit, all) = r.score();
+                format!("Learn Song ▶ {hit}/{all}")
+            }
+            _ if self.notes.on => "Edit instrument".to_owned(),
+            _ => "Learn Song".to_owned(),
+        }
+    }
+
     /// Whether a run is going (not yet played through).
     fn running(&self) -> bool {
         self.notes.run.as_ref().is_some_and(|r| !r.finished())
@@ -1261,6 +1291,7 @@ impl App {
         let mut start = false;
         let mut pick = false;
         let mut close = false;
+        let mut key_scale = None;
         ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
             let running = self.notes.run.as_ref().is_some_and(|r| !r.finished());
@@ -1295,6 +1326,20 @@ impl App {
             if let Some((song, path)) = &self.notes.song {
                 ui.label(RichText::new(format!("Song: {}", song.name)).strong())
                     .on_hover_text(path.display().to_string());
+                // The key, when the file says (notation programs write it; recordings often not). A
+                // click shows its scale's fingering on the keys, another click none.
+                if let Some(k) = song.key {
+                    let mut shown = self.preview == Preview::Scale(k.scale());
+                    if toggle(ui, &mut shown, k.name())
+                        .on_hover_text(
+                            "The key the file gives (its first key signature). Click to show its scale's \
+                             fingering on the keys; again for none.",
+                        )
+                        .clicked()
+                    {
+                        key_scale = Some(if shown { Preview::Scale(k.scale()) } else { Preview::Off });
+                    }
+                }
                 close = ui.button("Close").on_hover_text("Close the song").clicked();
             }
             pick = ui
@@ -1320,6 +1365,9 @@ impl App {
         if close {
             self.stop_run();
             self.notes.song = None;
+        }
+        if let Some(p) = key_scale {
+            self.preview = p;
         }
     }
 }
@@ -1607,6 +1655,59 @@ fn sliders_icon(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
         let x = w.mul_add(x, rect.left());
         painter.vline(x, rect.y_range(), egui::Stroke::new(1.4, colour));
         painter.circle_filled(egui::pos2(x, h.mul_add(knob, rect.top())), w * 0.13, colour);
+    }
+}
+
+/// A stylised upright piano in `colour`: outlines, with faint fills, on no background.
+fn upright_piano(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let at = |x: f32, y: f32| {
+        egui::pos2(
+            rect.width().mul_add(x, rect.left()),
+            rect.height().mul_add(y, rect.top()),
+        )
+    };
+    let area = |x0, y0, x1, y1| egui::Rect::from_min_max(at(x0, y0), at(x1, y1));
+    let line = egui::Stroke::new(1.5, colour);
+    let thin = egui::Stroke::new(1.0, colour.gamma_multiply(0.7));
+    let face = colour.gamma_multiply(0.12);
+    let shape = |r: egui::Rect, radius: f32, fill: Color32, stroke: egui::Stroke| {
+        painter.rect(r, radius, fill, stroke, egui::StrokeKind::Middle);
+    };
+    // The lid, the upper case with its front panel, the lower case with its panel.
+    shape(area(0.04, 0.0, 0.96, 0.05), 2.0, colour.gamma_multiply(0.3), line);
+    shape(area(0.08, 0.05, 0.92, 0.52), 2.0, face, line);
+    shape(area(0.17, 0.12, 0.83, 0.44), 3.0, Color32::TRANSPARENT, thin);
+    shape(area(0.08, 0.7, 0.92, 0.94), 2.0, face, line);
+    shape(area(0.17, 0.74, 0.83, 0.88), 3.0, Color32::TRANSPARENT, thin);
+    // The keyboard between the cheeks: three octaves of white keys, black keys over them.
+    shape(area(0.02, 0.52, 0.08, 0.7), 1.5, colour.gamma_multiply(0.3), line);
+    shape(area(0.92, 0.52, 0.98, 0.7), 1.5, colour.gamma_multiply(0.3), line);
+    let keys = area(0.08, 0.55, 0.92, 0.68);
+    shape(area(0.08, 0.52, 0.92, 0.55), 0.0, colour.gamma_multiply(0.3), line);
+    shape(keys, 0.0, Color32::TRANSPARENT, line);
+    let whites = 21u8;
+    let white_w = keys.width() / f32::from(whites);
+    for i in 1..whites {
+        let x = white_w.mul_add(f32::from(i), keys.left());
+        painter.vline(x, keys.y_range(), thin);
+    }
+    for i in 1..whites {
+        // A black key after C, D, F, G and A: on the line before white key `i`.
+        if matches!(i % 7, 1 | 2 | 4 | 5 | 6) {
+            let x = white_w.mul_add(f32::from(i), keys.left());
+            let black = egui::Rect::from_min_max(
+                egui::pos2(white_w.mul_add(-0.3, x), keys.top()),
+                egui::pos2(white_w.mul_add(0.3, x), keys.height().mul_add(0.6, keys.top())),
+            );
+            painter.rect_filled(black, 0.5, colour);
+        }
+    }
+    // Two pedals, and the feet.
+    for x in [0.43, 0.52] {
+        shape(area(x, 0.9, x + 0.05, 0.93), 1.0, colour, egui::Stroke::NONE);
+    }
+    for x in [0.06, 0.86] {
+        shape(area(x, 0.94, x + 0.08, 1.0), 1.0, colour.gamma_multiply(0.3), line);
     }
 }
 
@@ -2068,7 +2169,7 @@ impl eframe::App for App {
         // Silent only while playing along with the notes; the metronome clicks as ever otherwise.
         if let Some(m) = self.session.as_ref().map(Session::metronome) {
             let along = self.notes.run.as_ref().is_some_and(|r| !r.finished() && !r.wait);
-            m.set_silent(along && self.notes.silent);
+            m.set_silent(along && self.notes.song.is_some() && self.notes.silent);
         }
         // A newly started piano (at start, after a switch of instrument) gets the volume set.
         if let Some(p) = self.session.as_ref().and_then(|s| s.instrument().piano()) {

@@ -93,6 +93,30 @@ impl Scale {
         format!("{} {}", self.root_name(), self.kind.name())
     }
 
+    /// The letter (0 = C) `key` is written with in this scale: each degree has its own letter
+    /// (F# major's seventh is E#, not F). A key outside the scale: as out of context.
+    pub fn letter(self, key: u8) -> u8 {
+        let root_letter: u8 = match self.root_name().chars().next() {
+            Some('D') => 1,
+            Some('E') => 2,
+            Some('F') => 3,
+            Some('G') => 4,
+            Some('A') => 5,
+            Some('B') => 6,
+            _ => 0,
+        };
+        let step = (key % 12).wrapping_add(12).wrapping_sub(self.root % 12) % 12;
+        // Up and down (melodic minor comes down as natural minor), the same letters per degree.
+        [Direction::Up, Direction::Down]
+            .into_iter()
+            .find_map(|d| self.kind.played(d).steps().iter().position(|&s| s == step))
+            .and_then(|degree| u8::try_from(degree).ok())
+            .map_or_else(
+                || crate::chords::letter_of(key % 12, None),
+                |degree| root_letter.wrapping_add(degree) % 7,
+            )
+    }
+
     /// The root as the key is written: "Db", "F#", "C#".
     fn root_name(self) -> &'static str {
         const MAJOR: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];

@@ -8,7 +8,7 @@
 //!   waiting (the notes stop at the keys until they are played).
 //! - [`draw`]: the falling notes over the keyboard's key columns.
 
-use crate::fingering::{Direction, Hand, Scale};
+use crate::fingering::{Direction, Hand, Kind, Scale};
 use crate::keyboard::{LEFT_HAND, RIGHT_HAND, is_black};
 use egui::{Align2, Color32, FontId, Rect, Stroke, StrokeKind, pos2};
 use std::collections::BTreeMap;
@@ -34,6 +34,15 @@ pub struct Note {
     pub len: f64,
     /// How hard it is struck (1 to 127), when the app plays it.
     pub velocity: u8,
+    /// The letter it is written with (0 = C), for its name: [`Note::name`].
+    pub letter: u8,
+}
+
+impl Note {
+    /// Its name as written: "F#", "Bb", "E#".
+    pub fn name(&self) -> String {
+        crate::chords::spell(self.letter, self.key % 12)
+    }
 }
 
 /// What falls: notes sorted by their beat.
@@ -43,6 +52,49 @@ pub struct Song {
     pub notes: Vec<Note>,
     /// The tempo the song was written at, if it says (a MIDI file does).
     pub bpm: Option<u32>,
+    /// Its key, if the file says (notation programs write it; recordings often do not).
+    pub key: Option<Key>,
+}
+
+/// A key as a MIDI file gives it: its signature's sharps (positive) or flats (negative), and
+/// major or minor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key {
+    pub sharps: i8,
+    pub minor: bool,
+}
+
+impl Key {
+    /// The scale of this key: major, or natural minor for a minor key.
+    pub fn scale(self) -> Scale {
+        // The tonic's pitch class round the circle of fifths, from seven flats to seven sharps.
+        const MAJOR: [u8; 15] = [11, 6, 1, 8, 3, 10, 5, 0, 7, 2, 9, 4, 11, 6, 1];
+        const MINOR: [u8; 15] = [8, 3, 10, 5, 0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10];
+        let i = usize::try_from(self.sharps.clamp(-7, 7).saturating_add(7)).unwrap_or(7);
+        let (roots, kind) = if self.minor {
+            (MINOR, Kind::NaturalMinor)
+        } else {
+            (MAJOR, Kind::Major)
+        };
+        Scale {
+            root: roots.get(i).copied().unwrap_or(0),
+            kind,
+        }
+    }
+
+    /// "Bb major", "F# minor".
+    pub fn name(self) -> String {
+        // Round the circle of fifths from seven flats to seven sharps.
+        const MAJOR: [&str; 15] = [
+            "Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#",
+        ];
+        const MINOR: [&str; 15] = [
+            "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#",
+        ];
+        let i = usize::try_from(self.sharps.clamp(-7, 7).saturating_add(7)).unwrap_or(7);
+        let (names, kind) = if self.minor { (MINOR, "minor") } else { (MAJOR, "major") };
+        format!("{} {kind}", names.get(i).copied().unwrap_or("C"))
+    }
 }
 
 impl Song {
@@ -63,6 +115,7 @@ impl Song {
                     hand,
                     finger: Some(finger),
                     velocity: 80,
+                    letter: s.letter(key),
                     beat: f64::from(u32::try_from(i).unwrap_or(u32::MAX)),
                     len: if last { 2.0 } else { 1.0 },
                 });
@@ -73,6 +126,7 @@ impl Song {
             name: s.name(),
             notes,
             bpm: None,
+            key: None,
         }
     }
 
@@ -94,6 +148,8 @@ impl Song {
             Timing::Timecode(fps, sub) => 2.0 / (f64::from(fps.as_f32()) * f64::from(sub.max(1))),
         };
         let mut bpm = None;
+        // The first key signature.
+        let mut key: Option<Key> = None;
         // Per part: (track or channel, notes); a part is a track, or a channel in a one-track file.
         let mut parts: BTreeMap<usize, Part> = BTreeMap::new();
         let one_track = smf.tracks.len() == 1;
@@ -111,6 +167,9 @@ impl Song {
                             let us = f64::from(us.as_int().max(1));
                             bpm = Some(60_000_000.0 / us);
                         }
+                    }
+                    TrackEventKind::Meta(MetaMessage::KeySignature(sharps, minor)) => {
+                        key.get_or_insert(Key { sharps, minor });
                     }
                     TrackEventKind::Meta(MetaMessage::TrackName(n)) => {
                         name_of_track = String::from_utf8_lossy(n).into_owned();
@@ -151,6 +210,7 @@ impl Song {
             return Err("the file has no notes".to_owned());
         }
         let hands = assign_hands(&parts);
+        let signature = key.map(|k| k.sharps);
         let first = parts
             .iter()
             .flat_map(|p| p.notes.iter().map(|&(_, b, _, _)| b))
@@ -166,6 +226,7 @@ impl Song {
                     hand: hand.unwrap_or(if key >= 60 { Hand::Right } else { Hand::Left }),
                     finger: None,
                     velocity,
+                    letter: crate::chords::letter_of(key % 12, signature),
                     beat: beat - shift,
                     len: len.max(0.05),
                 })
@@ -175,6 +236,7 @@ impl Song {
         Ok(Self {
             name: name.to_owned(),
             notes,
+            key,
             bpm: bpm.map(|b: f64| {
                 let b = b.round().clamp(1.0, 1000.0);
                 (1..=1000u32).find(|&n| f64::from(n) >= b).unwrap_or(120)
@@ -497,18 +559,30 @@ pub fn draw(
         let radius = (rect.width() * 0.25).min(6.0);
         painter.rect_filled(rect, radius, fill);
         painter.rect_stroke(rect, radius, Stroke::new(1.0, edge), StrokeKind::Inside);
-        if let Some(finger) = n.finger
-            && rect.width() >= 10.0
-            && rect.height() >= 14.0
-        {
-            let size = (rect.width() * 0.6).clamp(9.0, 16.0);
-            painter.text(
-                pos2(rect.center().x, rect.bottom() - 3.0),
-                Align2::CENTER_BOTTOM,
-                finger.to_string(),
-                FontId::proportional(size),
-                Color32::WHITE,
-            );
+        // At the bottom, where it lands: the finger (scales), and the note's name above it.
+        if rect.width() >= 10.0 {
+            let size = (rect.width() * 0.62).clamp(10.5, 16.0);
+            let name_size = (rect.width() * 0.5).clamp(9.5, 14.0);
+            let mut bottom = rect.bottom() - 3.0;
+            if let Some(finger) = n.finger.filter(|_| rect.height() >= 14.0) {
+                painter.text(
+                    pos2(rect.center().x, bottom),
+                    Align2::CENTER_BOTTOM,
+                    finger.to_string(),
+                    FontId::proportional(size),
+                    Color32::WHITE,
+                );
+                bottom -= size + 2.0;
+            }
+            if bottom - name_size >= rect.top() + 2.0 {
+                painter.text(
+                    pos2(rect.center().x, bottom),
+                    Align2::CENTER_BOTTOM,
+                    n.name(),
+                    FontId::proportional(name_size),
+                    Color32::WHITE.gamma_multiply(0.85),
+                );
+            }
         }
     }
 
@@ -532,7 +606,6 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fingering::Kind;
 
     fn c_major() -> Song {
         Song::scale(Scale {
@@ -602,6 +675,88 @@ mod tests {
         assert_eq!(starts, [(38, 80), (62, 80)]);
         assert_eq!(ends, [36, 60]);
         assert_eq!(s.between(0.2, 0.8), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn notes_are_named_as_their_scale_writes_them() {
+        let names = |root, kind| {
+            let s = Song::scale(Scale { root, kind });
+            let mut up: Vec<String> = s
+                .notes
+                .iter()
+                .filter(|n| n.hand == Hand::Right)
+                .take(8)
+                .map(Note::name)
+                .collect();
+            up.dedup();
+            up.join(" ")
+        };
+        assert_eq!(names(6, Kind::Major), "F# G# A# B C# D# E# F#");
+        assert_eq!(names(1, Kind::Major), "Db Eb F Gb Ab Bb C Db");
+        assert_eq!(names(9, Kind::HarmonicMinor), "A B C D E F G# A");
+        // Melodic minor comes down as natural minor: G, F going down from A.
+        let s = Song::scale(Scale {
+            root: 9,
+            kind: Kind::MelodicMinor,
+        });
+        let right: Vec<String> = s
+            .notes
+            .iter()
+            .filter(|n| n.hand == Hand::Right)
+            .map(Note::name)
+            .collect();
+        assert_eq!(right.get(5..7), Some(&["F#".to_owned(), "G#".to_owned()][..]));
+        assert_eq!(right.get(15..17), Some(&["G".to_owned(), "F".to_owned()][..]));
+    }
+
+    #[test]
+    fn a_songs_notes_follow_its_key_signature() {
+        // small_midi with Bb (A#, key 70) added, and then a key signature of two flats.
+        let song = |signature: Option<u8>| {
+            let mut track = Vec::new();
+            if let Some(flats) = signature {
+                track.extend_from_slice(&[0x00, 0xFF, 0x59, 0x02, flats, 0x00]);
+            }
+            track.extend_from_slice(&[0x00, 0x90, 70, 100, 0x83, 0x60, 0x80, 70, 0, 0x00, 0xFF, 0x2F, 0x00]);
+            let mut f = b"MThd\0\0\0\x06\0\0\0\x01\x01\xE0MTrk".to_vec();
+            f.extend_from_slice(&u32::try_from(track.len()).unwrap().to_be_bytes());
+            f.append(&mut track);
+            Song::from_midi(&f, "t").unwrap().notes[0].name()
+        };
+        assert_eq!(song(None), "Bb", "the usual name without a signature");
+        let key = |b: &[u8]| {
+            let mut track = vec![0x00, 0xFF, 0x59, 0x02];
+            track.extend_from_slice(b);
+            track.extend_from_slice(&[0x00, 0x90, 60, 100, 0x83, 0x60, 0x80, 60, 0, 0x00, 0xFF, 0x2F, 0x00]);
+            let mut f = b"MThd\0\0\0\x06\0\0\0\x01\x01\xE0MTrk".to_vec();
+            f.extend_from_slice(&u32::try_from(track.len()).unwrap().to_be_bytes());
+            f.append(&mut track);
+            Song::from_midi(&f, "t").unwrap().key.map(Key::name)
+        };
+        assert_eq!(key(&[0xFE, 0]).as_deref(), Some("Bb major"));
+        // Each key's scale has the key's name.
+        for sharps in -7..=7 {
+            for minor in [false, true] {
+                let k = Key { sharps, minor };
+                let enharmonic = matches!(
+                    k.name().as_str(),
+                    "Cb major" | "C# major" | "A# minor" | "D# minor" | "Ab minor" | "Gb major"
+                );
+                if !enharmonic {
+                    let scale = k.scale().name().replace(" natural minor", " minor");
+                    assert_eq!(scale, k.name(), "{sharps} sharps, minor {minor}");
+                }
+            }
+        }
+        assert_eq!(key(&[0x03, 1]).as_deref(), Some("F# minor"));
+        assert_eq!(key(&[0x00, 0]).as_deref(), Some("C major"));
+        assert_eq!(
+            Song::from_midi(&small_midi(), "t").unwrap().key,
+            None,
+            "none in the file"
+        );
+        assert_eq!(song(Some(0xFE)), "Bb", "two flats");
+        assert_eq!(song(Some(0x02)), "A#", "two sharps");
     }
 
     #[test]
