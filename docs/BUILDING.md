@@ -95,8 +95,16 @@ With a folder given, the zip is copied there too. A build from uncommitted chang
 
 ## Icon
 
-`assets/icon/onezan.svg` (dragon scales: scales, as in piano scales) is the source;
-`assets/icon/onezan.png` is rendered from it with `rsvg-convert -w 256`.
+`assets/icon/onezan.svg` (dragon scales: scales, as in piano scales) is the source.
+`build/make-icon.sh` renders the rest from it (rsvg-convert, ImageMagick, Python 3); run it again
+after changing the SVG and commit what it makes:
+
+- `onezan.png` (256 px): the AppImage.
+- `onezan-128.png`: the window icon, embedded in the binary. On Linux the window is always an
+  X11 one (XWayland under Wayland), and a 256 px icon is too big for one X11 request: the
+  window would have none.
+- `onezan.ico` (16 to 256 px): the Windows exe's icon. `apps/onezan/build.rs` compiles it into
+  the exe with MinGW's `windres` (`x86_64-w64-mingw32-windres`, or `$WINDRES`).
 
 ## Layout
 

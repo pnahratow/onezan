@@ -150,8 +150,8 @@ embedded editor. The user considers this state good for a v1 tag.
 1. **v1**: final touch-ups, check the clef column on Windows, version 1.0.0, tag. The repo is
    public at github.com/pnahratow/onezan; CI and the release workflow (Linux tarball, AppImage,
    Windows zip, a draft release per tag) are in `.github/workflows/` (see docs/BUILDING.md).
-   The icon (`assets/icon/`) is used by the AppImage only; the window and the Windows exe have
-   none yet.
+   The icon (`assets/icon/`) is on the AppImage, the windows and the Windows exe (see
+   docs/BUILDING.md); check the exe's icon in Explorer on a real Windows PC.
 2. **Scale trainer basics**: hands separately and contrary motion, choosing octaves, showing the
    way down (melodic minor differs), the learning order (`fingering::LEARNING_ORDER`) as a path.
    The table is done (see "Fingering table" below).
@@ -699,7 +699,7 @@ the mode button's violet works on both.
 (`--quick`: Linux only). Saved-file fixtures in `apps/onezan/fixtures/` and
 `crates/vst3-host/fixtures/` must keep loading. 97 tests on Linux at this point.
 
-## Falling notes (branch `falling-notes`, 2026-11-26, experiment)
+## Falling notes (2026-11-26, merged)
 
 The user's idea: use the space the plugin's editor takes for the "falling notes" way of learning
 a piece, as piano videos and games show it, mainly to learn songs from MIDI files. The bar's

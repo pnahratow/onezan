@@ -27,7 +27,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often the plugin's editor is serviced (its timers and X11 connection) while it is open.
@@ -61,11 +61,7 @@ pub fn run(mut opts: Options) -> Result<()> {
         .filter(|s| s.iter().all(|v| v.is_finite()))
         .map_or(DEFAULT_SIZE, |[w, h]| [w.max(MIN_SIZE[0]), h.max(MIN_SIZE[1])]);
     let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("onezan")
-            .with_app_id("onezan")
-            .with_inner_size(size)
-            .with_min_inner_size(MIN_SIZE),
+        viewport: window("onezan").with_inner_size(size).with_min_inner_size(MIN_SIZE),
         ..Default::default()
     };
     let mut event_loop = {
@@ -230,6 +226,24 @@ struct Notes {
     last_beat: Option<f64>,
     /// Playing along without hearing the metronome (it keeps the time, silently).
     silent: bool,
+}
+
+/// A window of the app: its title, the app's id (the X11 class, which desktops match to
+/// `onezan.desktop`) and the icon. The icon is 128 px: a 256 px one does not fit in one X11
+/// request, and the window would have none.
+fn window(title: &str) -> egui::ViewportBuilder {
+    static ICON: OnceLock<Option<Arc<egui::IconData>>> = OnceLock::new();
+    let icon = ICON.get_or_init(|| {
+        eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/onezan-128.png"))
+            .map_err(|e| log::warn!("the window icon does not load: {e}"))
+            .ok()
+            .map(Arc::new)
+    });
+    let builder = egui::ViewportBuilder::default().with_title(title).with_app_id("onezan");
+    match icon {
+        Some(icon) => builder.with_icon(Arc::clone(icon)),
+        None => builder,
+    }
 }
 
 fn midi_state(c: &MidiChange) -> MidiState {
@@ -537,10 +551,7 @@ impl App {
     /// the main window.
     fn options_window(&mut self, ctx: &egui::Context) {
         let metronome = self.metronome().cloned();
-        let builder = egui::ViewportBuilder::default()
-            .with_title("onezan options")
-            .with_app_id("onezan")
-            .with_inner_size([420.0, 560.0]);
+        let builder = window("onezan options").with_inner_size([420.0, 560.0]);
         let size = &mut self.options_size;
         let (session, audio_note, lists) = (self.session.as_ref(), self.audio_note.as_deref(), &mut self.menus);
         let theme = &mut self.theme;
@@ -661,10 +672,7 @@ impl App {
         });
         let current = self.session.as_ref().map(|s| s.instrument().id().to_owned());
         let note = self.instrument_note.clone();
-        let builder = egui::ViewportBuilder::default()
-            .with_title("onezan instruments")
-            .with_app_id("onezan")
-            .with_inner_size([440.0, 420.0]);
+        let builder = window("onezan instruments").with_inner_size([440.0, 420.0]);
         let (mut pick, mut rescan, mut toggle_star) = (None, false, None::<String>);
         let favorites = &self.favorite_instruments;
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("instruments"), builder, |ui, _| {
@@ -760,10 +768,7 @@ impl App {
             self.practice_read = Some(Instant::now());
         }
         ctx.request_repaint_after(PRACTICE_REFRESH);
-        let builder = egui::ViewportBuilder::default()
-            .with_title("onezan scales")
-            .with_app_id("onezan")
-            .with_inner_size([560.0, 640.0]);
+        let builder = window("onezan scales").with_inner_size([560.0, 640.0]);
         let (preview, order, practice) = (&mut self.preview, &mut self.scale_order, &self.practice);
         let favorites = &mut self.favorite_scales;
         let history = self.recorder.is_some();
