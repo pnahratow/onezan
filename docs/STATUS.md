@@ -8,7 +8,9 @@ Last updated: 2026-11-27. Read this first when resuming.
 goes onto this long-lived branch and becomes 0.3.0 only when the app has real polish; master
 stays at 0.2.0 until then. Done there so far: plugins that crash onezan are skipped at the next
 start, and scanning is cached (ROADMAP.md, Part 1, item 2); the first run explains itself
-(item 3); a message box when the window cannot open; the window fits small screens.
+(item 3); a message box when the window cannot open; the window fits small screens; scale
+exercises (item 4: hands, octaves, evenness, tempo ladder; research in
+docs/research/learning-scales.md). Hand checks owed: QA.md.
 
 **Scope reset on 2026-11-26.** What onezan does today is the release. No new features until it is
 out: the work now is fine-tuning, fixing rough edges and testing by hand on Linux and Windows,

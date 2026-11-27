@@ -380,6 +380,11 @@ impl Exercise {
     /// The most octaves; contrary motion goes up to 2 (both hands spread from the middle).
     pub const MAX_OCTAVES: u8 = 4;
 
+    /// Its name in the practice history: `hands/octaves`, e.g. "contrary motion/2".
+    pub fn id(self) -> String {
+        format!("{}/{}", self.hands.name(), self.octaves())
+    }
+
     /// The octaves played: 1 to [`Self::MAX_OCTAVES`], at most 2 in contrary motion.
     pub fn octaves(self) -> u8 {
         let max = if self.hands == Hands::Contrary {

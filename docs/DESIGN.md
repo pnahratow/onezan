@@ -77,7 +77,12 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   tips.rs               the line above the keyboard as a guide: the next tip not yet done (no
                         keyboard; play the scale; the metronome; Learn Song), one at a time
   instrument_state.rs   the instrument's sound (plugin state) per plugin, saved on quit
-  progress.rs           practice history: every note with its scale, in SQLite; practice time
+  progress.rs           practice history: every note with its scale, in SQLite; practice time;
+                        the scale exercises played along (runs: tempo, evenness, clean), the
+                        fastest clean tempo per scale and exercise
+  ladder.rs             the tempo ladder: clean (every note on time, timing spread within
+                        ±30 ms) goes up a metronome marking, a near miss stays, many misses
+                        go down
   chords.rs             chord names (root, type, inversion, spelling) and a fingering for the held
                         keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both

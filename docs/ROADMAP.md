@@ -39,6 +39,18 @@ version. Each would make onezan a weaker copy of the subscription apps. Say so i
 4. **Scales as exercises.** onezan sees the timing and velocity of every note, so it can score
    how even a scale is; no other app does that. A tempo ladder (clean at 60, then 66, ...),
    hands separately, contrary motion. First in line.
+   *Started on `polish-0.3` (2026-11-27), see docs/research/learning-scales.md for the
+   teaching behind it. Done: hands (together an octave apart, one hand, contrary motion) and
+   1 to 4 octaves; evenness after a run (timing, loudness, hands apart, lean); the tempo
+   ladder with the fastest clean tempo in the scales window.* Next, from the research:
+   - **Notes per beat (2, 3, 4) at a fixed beat.** The falling scale is one note per beat, so
+     the ladder's top (208) is about 3.5 notes a second, exam grade 4; grade 8 asks about 6.
+   - **Where the unevenness is:** per position in the scale ("every right-hand thumb is early
+     and loud"), the thumb crossings above all.
+   - **Rhythm and accent variants** (dotted, reverse-dotted, groups of 3 or 4), then even
+     again; staccato and dynamics (crescendo up, diminuendo down) checked from MIDI.
+   - **Stages as presets** (one octave hands separately, contrary motion, two octaves hands
+     together, ...) and a daily rotation of 2 to 4 keys.
 5. **Exam scale lists.** Arpeggios, and ready-made sets such as "ABRSM Grade 3" or "RCM Level 5
    scales". A specific, findable audience with a reason to pick onezan.
 6. **Falling notes, the cheap fixes that matter most.** Follow tempo changes in the file, loop

@@ -18,6 +18,7 @@ mod gui;
 mod instrument_state;
 mod keyboard;
 mod known_plugins;
+mod ladder;
 mod last_error;
 mod piano;
 mod plugins;

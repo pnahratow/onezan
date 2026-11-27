@@ -265,6 +265,8 @@ struct App {
     scale_notes: u32,
     /// How the scale is practised (hands, octaves): what falls and what the keys show.
     exercise: Exercise,
+    /// The fastest clean tempo per scale in that exercise, read with `practice`.
+    clean: HashMap<String, u32>,
 }
 
 /// The falling notes, shown in place of the instrument's window.
@@ -415,6 +417,7 @@ impl App {
                     .unwrap_or_default(),
                 octaves: settings.exercise_octaves.unwrap_or_else(|| Exercise::default().octaves),
             },
+            clean: HashMap::new(),
             saved: settings,
             changed_at: None,
             notes,
@@ -870,11 +873,13 @@ impl App {
             && let Some(path) = &self.progress_path
         {
             self.practice = crate::progress::practice(path);
+            self.clean = crate::progress::clean_tempos(path, &self.exercise.id());
             self.practice_read = Some(Instant::now());
         }
         ctx.request_repaint_after(PRACTICE_REFRESH);
-        let builder = window("onezan scales").with_inner_size([560.0, 640.0]);
+        let builder = window("onezan scales").with_inner_size([640.0, 640.0]);
         let (preview, order, practice) = (&mut self.preview, &mut self.scale_order, &self.practice);
+        let (clean, exercise) = (&self.clean, self.exercise);
         let favorites = &mut self.favorite_scales;
         let history = self.recorder.is_some();
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("scales"), builder, |ui, _| {
@@ -900,7 +905,7 @@ impl App {
                     }
                 });
                 ui.separator();
-                scale_list(ui, preview, *order, practice, favorites);
+                scale_list(ui, preview, *order, (practice, clean, exercise), favorites);
             });
             ui.ctx().input(|i| i.viewport().close_requested())
         });
@@ -1385,9 +1390,49 @@ impl App {
         if self.notes.run.as_ref().is_some_and(Run::finished) {
             self.end_metronome();
             self.release_notes();
+            self.judge_run();
         }
         if let Some(m) = self.metronome() {
             m.set_silent(self.metronome_silent());
+        }
+    }
+
+    /// Once a run is played through: a scale exercise played along with the metronome is
+    /// recorded, and a clean one moves the metronome up the ladder (see `ladder`).
+    fn judge_run(&mut self) {
+        let bpm = self.metronome().map(|m| m.bpm());
+        let scale = match (&self.notes.song, self.preview) {
+            (None, Preview::Scale(s)) => Some(s),
+            _ => None,
+        };
+        let exercise = self.exercise;
+        let Some(run) = self.notes.run.as_mut().filter(|r| r.verdict.is_none()) else {
+            return;
+        };
+        let (Some(scale), Some(bpm), false) = (scale, bpm, run.wait) else {
+            run.verdict = Some(String::new());
+            return;
+        };
+        let e = run.evenness();
+        let clean = crate::ladder::clean(&e);
+        let next = crate::ladder::after(&e, bpm);
+        run.verdict = Some(crate::ladder::verdict(clean, bpm, next));
+        if let Some(r) = &self.recorder {
+            r.record_run(crate::progress::RunRecord {
+                scale: scale.name(),
+                exercise: exercise.id(),
+                bpm,
+                played: u32::try_from(e.played).unwrap_or(u32::MAX),
+                notes: u32::try_from(e.notes).unwrap_or(u32::MAX),
+                spread_ms: e.spread_ms,
+                loudness: e.loudness,
+                clean,
+            });
+            // The scales window shows it at its next look.
+            self.practice_read = None;
+        }
+        if let Some(m) = self.metronome() {
+            m.set_bpm(next);
         }
     }
 
@@ -1443,10 +1488,12 @@ impl App {
                 20.0,
             ),
             Some(r) if r.finished() => {
+                let verdict = r.verdict.as_deref().filter(|v| !v.is_empty());
                 big(
                     format!(
-                        "{}\nbest streak {}  ·  Space: again",
+                        "{}\n{}best streak {}  ·  Space: again",
                         r.evenness().summary(r.wait),
+                        verdict.map_or_else(String::new, |v| format!("{v}\n")),
                         r.best_streak
                     ),
                     20.0,
@@ -1503,6 +1550,8 @@ impl App {
                 exercise_controls(ui, &mut self.exercise);
                 if self.exercise != before {
                     self.stop_run();
+                    // The scales window's "Clean at" is per exercise.
+                    self.practice_read = None;
                 }
                 ui.separator();
             }
@@ -2147,13 +2196,16 @@ fn toggle_favorite(favorites: &mut Vec<String>, id: &str) {
 
 /// The scales in `order`, starred ones first, as a table: star, name, time spent, last
 /// played. Clicking a name shows it; clicking the star (un)marks it as a favorite.
+/// The scales window's list. `history`: the practice per scale, and the fastest clean tempo
+/// per scale in `exercise` (the one chosen in Learn Song).
 fn scale_list(
     ui: &mut egui::Ui,
     preview: &mut Preview,
     order: ScaleOrder,
-    practice: &HashMap<String, Practice>,
+    history: (&HashMap<String, Practice>, &HashMap<String, u32>, Exercise),
     favorites: &mut Vec<String>,
 ) {
+    let (practice, clean, exercise) = history;
     let mut scales: Vec<(Scale, String, Practice)> = Scale::all()
         .map(|s| {
             let name = s.name();
@@ -2174,7 +2226,7 @@ fn scale_list(
     let mut toggle = None;
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Grid::new("scales")
-            .num_columns(5)
+            .num_columns(6)
             .striped(true)
             .spacing([18.0, 6.0])
             .show(ui, |ui| {
@@ -2183,6 +2235,17 @@ fn scale_list(
                 ui.label(RichText::new("Scale").strong());
                 ui.label(RichText::new("Time spent").strong());
                 ui.label(RichText::new("Last played").strong());
+                ui.label(RichText::new("Clean at").strong()).on_hover_text(format!(
+                    "The fastest metronome tempo the scale was played clean at ({}, {}), in Learn \
+                     Song with the metronome: every note on time, the timing within ±{:.0} ms",
+                    exercise.hands.name(),
+                    if exercise.octaves() == 1 {
+                        "1 octave".to_owned()
+                    } else {
+                        format!("{} octaves", exercise.octaves())
+                    },
+                    crate::ladder::CLEAN_SPREAD_MS
+                ));
                 ui.end_row();
                 for (title, list, is_fav) in [("Favorites", starred, true), ("All scales", rest, false)] {
                     if list.is_empty() {
@@ -2210,6 +2273,7 @@ fn scale_list(
                                 .zip(now)
                                 .map_or_else(|| "–".to_owned(), |(t, n)| ago(n.saturating_sub(t))),
                         );
+                        ui.label(clean.get(&name).map_or_else(|| "–".to_owned(), u32::to_string));
                         ui.end_row();
                     }
                 }

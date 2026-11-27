@@ -96,6 +96,22 @@ comes from when each key arrived over MIDI (to the millisecond), not from the fr
 | "a little early / late": matches how it felt against the click | | |
 | "Wait for me": no timing (it has no beat), loudness only | | |
 
+### Scale exercises, step 3: the tempo ladder (branch `polish-0.3`, 2026-11-27)
+
+A scale played along with the metronome (not "Wait for me"), once through: clean (every note
+on time, the timing's spread within ±30 ms) moves the metronome up one marking (88 → 92); a
+near miss (90 % on time or more) stays; fewer goes one marking down. The end screen says which.
+Every such run is kept in the practice history; the scales window's "Clean at" shows the
+fastest clean tempo per scale for the exercise chosen in Learn Song.
+
+| Check | Linux | Windows |
+|---|---|---|
+| A clean run: "Clean at 88: next 92", the metronome now at 92 | | |
+| A near miss: "Not clean yet ...: again at 88"; many misses: "Many notes missed: down to 84" | | |
+| The scales window: "Clean at" shows it; another exercise (hands, octaves) shows its own | | ✓ VM (the column, empty) |
+| ±30 ms: too strict or too lenient? (a guess: no teaching source gives a number) | | |
+| Climbing feels right: one marking per clean run, not too slow, not too fast | | |
+
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
 "earlier": STATUS.md listed these for real Windows only.

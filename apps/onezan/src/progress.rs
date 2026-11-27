@@ -32,6 +32,7 @@ enum Msg {
         velocity: u8,
     },
     Scale(Option<String>),
+    Run(i64, RunRecord),
     /// Write what is left and end.
     Stop,
 }
@@ -72,6 +73,13 @@ impl Recorder {
             if let Some(tx) = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                 let _ = tx.send(msg);
             }
+        }
+    }
+
+    /// Records a scale exercise played through with the metronome.
+    pub fn record_run(&self, run: RunRecord) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::Run(now_ms(), run));
         }
     }
 
@@ -138,7 +146,19 @@ fn open_checked(path: &Path) -> rusqlite::Result<Connection> {
             scale TEXT                  -- the scale selected then, e.g. 'D major'; NULL: none
         );
         CREATE INDEX IF NOT EXISTS notes_by_scale ON notes (scale, t_ms);
-        PRAGMA user_version = 1;",
+        CREATE TABLE IF NOT EXISTS runs (
+            t_ms INTEGER NOT NULL,      -- when it ended, in ms since 1970 (UTC)
+            scale TEXT NOT NULL,        -- e.g. 'D major'
+            exercise TEXT NOT NULL,     -- e.g. 'hands together/2' (hands/octaves)
+            bpm INTEGER NOT NULL,
+            played INTEGER NOT NULL,    -- notes on time
+            notes INTEGER NOT NULL,
+            spread_ms REAL,             -- the timing's standard deviation
+            loudness REAL,              -- the velocity's standard deviation
+            clean INTEGER NOT NULL      -- 1: every note on time and the timing even
+        );
+        CREATE INDEX IF NOT EXISTS runs_by_exercise ON runs (exercise, scale);
+        PRAGMA user_version = 2;",
     )?;
     Ok(conn)
 }
@@ -155,6 +175,12 @@ fn write_loop(conn: &Connection, rx: &mpsc::Receiver<Msg>) {
             Ok(Msg::Scale(s)) => {
                 scale = s;
                 (true, false)
+            }
+            Ok(Msg::Run(t_ms, run)) => {
+                if let Err(e) = write_run(conn, t_ms, &run) {
+                    log::warn!("practice history: cannot write a run: {e}");
+                }
+                (false, false)
             }
             Err(RecvTimeoutError::Timeout) => (true, false),
             Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => (true, true),
@@ -180,6 +206,66 @@ fn write(conn: &Connection, batch: &[(i64, u8, u8, Option<String>)]) -> rusqlite
         }
     }
     tx.commit()
+}
+
+/// A scale exercise played through along with the metronome, and how it went.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunRecord {
+    pub scale: String,
+    /// The exercise's id: `hands/octaves`, e.g. "contrary motion/2".
+    pub exercise: String,
+    pub bpm: u32,
+    pub played: u32,
+    pub notes: u32,
+    pub spread_ms: Option<f64>,
+    pub loudness: Option<f64>,
+    pub clean: bool,
+}
+
+fn write_run(conn: &Connection, t_ms: i64, r: &RunRecord) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO runs (t_ms, scale, exercise, bpm, played, notes, spread_ms, loudness, clean)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            t_ms,
+            r.scale,
+            r.exercise,
+            r.bpm,
+            r.played,
+            r.notes,
+            r.spread_ms,
+            r.loudness,
+            r.clean
+        ],
+    )?;
+    Ok(())
+}
+
+/// The fastest tempo each scale was played clean at in `exercise` (its id), by scale name.
+pub fn clean_tempos(path: &Path, exercise: &str) -> HashMap<String, u32> {
+    let read = || -> rusqlite::Result<HashMap<String, u32>> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        // A history from before runs were kept has no such table.
+        let has_runs: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'runs')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_runs {
+            return Ok(HashMap::new());
+        }
+        let mut stmt =
+            conn.prepare("SELECT scale, MAX(bpm) FROM runs WHERE clean = 1 AND exercise = ?1 GROUP BY scale")?;
+        let rows = stmt.query_map([exercise], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        rows.collect()
+    };
+    if !path.exists() {
+        return HashMap::new();
+    }
+    read().unwrap_or_else(|e| {
+        log::warn!("practice history: cannot read the runs in {}: {e}", path.display());
+        HashMap::new()
+    })
 }
 
 /// What the history says about one scale.
@@ -344,5 +430,47 @@ mod tests {
     #[test]
     fn no_file_means_no_practice() {
         assert!(practice(&temp("none")).is_empty());
+    }
+
+    #[test]
+    fn the_fastest_clean_run_is_kept_per_scale_and_exercise() {
+        let path = temp("runs");
+        let rec = Recorder::start(&path).unwrap();
+        let run = |scale: &str, exercise: &str, bpm, clean| RunRecord {
+            scale: scale.into(),
+            exercise: exercise.into(),
+            bpm,
+            played: 29,
+            notes: 29,
+            spread_ms: Some(20.0),
+            loudness: Some(5.0),
+            clean,
+        };
+        rec.record_run(run("C major", "hands together/2", 80, true));
+        rec.record_run(run("C major", "hands together/2", 88, true));
+        rec.record_run(run("C major", "hands together/2", 96, false));
+        rec.record_run(run("C major", "contrary motion/2", 60, true));
+        rec.record_run(run("G major", "hands together/2", 72, true));
+        drop(rec);
+        let together = clean_tempos(&path, "hands together/2");
+        assert_eq!(
+            together.get("C major"),
+            Some(&88),
+            "the fastest clean one, not the faster unclean"
+        );
+        assert_eq!(together.get("G major"), Some(&72));
+        assert_eq!(clean_tempos(&path, "contrary motion/2").get("C major"), Some(&60));
+        assert!(clean_tempos(&path, "right hand/1").is_empty());
+    }
+
+    #[test]
+    fn a_history_without_runs_has_no_clean_tempos() {
+        let path = temp("no-runs");
+        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE notes (t_ms INTEGER, key INTEGER, velocity INTEGER, scale TEXT);")
+            .unwrap();
+        drop(conn);
+        assert!(clean_tempos(&path, "hands together/2").is_empty());
     }
 }

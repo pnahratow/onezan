@@ -372,6 +372,8 @@ pub struct Run {
     pub flashes: Vec<(u8, bool, f64)>,
     /// The notes played, with how far from their beat and how hard: for [`Run::evenness`].
     pub hits: Vec<Hit>,
+    /// Once played through and judged: what the tempo ladder says (empty: nothing).
+    pub verdict: Option<String>,
 }
 
 /// A note played: by which hand, how far from its beat (milliseconds, late positive; `None`
@@ -456,6 +458,7 @@ impl Run {
             best_streak: 0,
             flashes: Vec::new(),
             hits: Vec::new(),
+            verdict: None,
         }
     }
 
