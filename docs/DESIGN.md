@@ -254,7 +254,8 @@ one that crashed while it was scanned is not scanned (the instruments window lis
 picked automatically nor restored as the one used last time (the report says why). Asking for it
 (a click in the window, or a name or path on the command line) tries it again; so does an update
 (a new fingerprint). Not covered: a crash while it plays (audio thread) or later in its editor.
-Two onezans scanning at the same moment could take each other's note for a crash.
+Two onezans scanning at the same moment could take each other's note for a crash. Checked by hand
+with `build/test-plugins/` (two bundles that crash on purpose, see QA.md).
 
 **Scan cache.** `plugins.json` also keeps what each bundle held (name, vendor, class id,
 sub-categories) with its fingerprint, so a start loads only new or updated bundles. Bundles that

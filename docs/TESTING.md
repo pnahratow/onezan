@@ -41,7 +41,7 @@ What exists is marked ✓; the rest is open, to do when that part changes next.
 | Class ids print the same on every platform | ✓ `util.rs` |
 | Editor run loop: handlers and timers run, stop when unregistered | ✓ `run_loop.rs` |
 | Plugin state from an older onezan loads | ✓ `stream.rs` (fixture in `crates/vst3-host/fixtures/`) |
-| Scanning: a folder with a broken or non-VST3 bundle gives the others, never an error | open: a temp folder with a fake bundle (done by hand, see "Plugins that crash onezan" below) |
+| Scanning: a folder with a broken or non-VST3 bundle gives the others, never an error | open: a temp folder with a fake bundle (by hand: `build/test-plugins/`, see QA.md) |
 
 ### engine
 

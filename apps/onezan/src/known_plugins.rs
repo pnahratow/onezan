@@ -145,7 +145,18 @@ fn take_note_once(dir: &Path) {
 }
 
 fn canonical(bundle: &Path) -> PathBuf {
-    bundle.canonicalize().unwrap_or_else(|_| bundle.to_path_buf())
+    let path = bundle.canonicalize().unwrap_or_else(|_| bundle.to_path_buf());
+    without_verbatim_prefix(path)
+}
+
+/// `\\?\C:\...` (what Windows' canonical paths look like) as `C:\...`, the way people read
+/// paths. Other paths unchanged.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,6 +455,15 @@ mod tests {
     /// What a crash leaves behind: the note of a guard that was never dropped.
     fn crash_while(dir: &Path, bundle: &str, during: Activity) {
         std::mem::forget(guard_in(dir, Path::new(bundle), during));
+    }
+
+    #[test]
+    fn windows_paths_are_shown_without_the_verbatim_prefix() {
+        let p = |s: &str| without_verbatim_prefix(PathBuf::from(s));
+        assert_eq!(p(r"\\?\C:\VST3\Surge.vst3"), PathBuf::from(r"C:\VST3\Surge.vst3"));
+        // A network share keeps it: without it, the path would mean something else.
+        assert_eq!(p(r"\\?\UNC\host\share"), PathBuf::from(r"\\?\UNC\host\share"));
+        assert_eq!(p("/usr/lib/vst3/Surge.vst3"), PathBuf::from("/usr/lib/vst3/Surge.vst3"));
     }
 
     #[test]

@@ -37,7 +37,8 @@ postponed. What comes after the release is decided from scratch then. The old no
 - Releases: a Linux tarball and AppImage (glibc 2.30+), a Windows zip; built by GitHub Actions
   from a tag (see BUILDING.md).
 
-How each part works: DESIGN.md. Hand checks and release steps: RELEASE.md. Tests: TESTING.md.
+How each part works: DESIGN.md. Hand checks still to do: QA.md. Release steps and the full hand
+checklist: RELEASE.md. Tests: TESTING.md.
 What could come next, and how people find onezan: ROADMAP.md (a proposal, written 2026-11-27).
 
 ## Releases
@@ -53,13 +54,7 @@ What could come next, and how people find onezan: ROADMAP.md (a proposal, writte
 
 To go through one by one: fix, or accept and say so (README or DESIGN.md).
 
-**Not yet checked by hand** (see the checklist in RELEASE.md)
-- On real Windows: the clef column in the scales window, the exe's icon in Explorer and the task
-  bar, falling notes, MIDI keyboards replugged while running.
-- Falling notes anywhere: the file dialog, dropping a file on the window, Space in the notes view,
-  the mode button at narrow window widths (the bar's left part is cut off first).
-- Exact vs. immediate MIDI timing, by ear (only checked offline: no system here gives short
-  enough blocks).
+**Not yet checked by hand**: the list is in QA.md.
 
 **Known problems**
 - The mod wheel has no audible effect in Surge XT's default patch; unclear whether anything is
