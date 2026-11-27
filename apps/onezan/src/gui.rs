@@ -265,8 +265,11 @@ struct App {
     scale_notes: u32,
     /// How the scale is practised (hands, octaves): what falls and what the keys show.
     exercise: Exercise,
+    /// The scale and the exercise's hands and octaves at the last frame: a change starts the
+    /// tempo ladder again (`None` before the first frame).
+    last_mode: Option<(Preview, Hands, u8)>,
     /// The fastest clean tempo per scale in that exercise, read with `practice`.
-    clean: HashMap<String, u32>,
+    clean: CleanTempos,
     /// How late the player's notes arrive after the click heard (ms), from the timing
     /// calibration: taken off every note when judging.
     timing_offset_ms: f64,
@@ -425,8 +428,10 @@ impl App {
                     .and_then(Hands::from_name)
                     .unwrap_or_default(),
                 octaves: settings.exercise_octaves.unwrap_or_else(|| Exercise::default().octaves),
+                per_beat: settings.exercise_per_beat.unwrap_or(1).clamp(1, 4),
             },
             clean: HashMap::new(),
+            last_mode: None,
             timing_offset_ms: settings.timing_offset_ms.unwrap_or(0.0),
             calibrating: None,
             calibration_note: None,
@@ -497,6 +502,7 @@ impl App {
             tips_done: self.tips_done.clone(),
             exercise_hands: (self.exercise.hands != Hands::default()).then(|| self.exercise.hands.name().to_owned()),
             exercise_octaves: (self.exercise.octaves != Exercise::default().octaves).then_some(self.exercise.octaves),
+            exercise_per_beat: (self.exercise.per_beat != 1).then_some(self.exercise.per_beat),
             timing_offset_ms: (self.timing_offset_ms != 0.0).then_some(self.timing_offset_ms),
         }
     }
@@ -1091,6 +1097,22 @@ impl App {
     }
 
     /// The keys held now: on the MIDI keyboard, and with the mouse.
+    /// A scale exercise changed (another scale, other hands or octaves, no song open): the
+    /// metronome goes back to the tempo ladder's start, one note to a click. Not at the first
+    /// frame: the tempo saved last time stays.
+    fn follow_mode(&mut self) {
+        let mode = (self.preview, self.exercise.hands, self.exercise.octaves());
+        let before = self.last_mode.replace(mode);
+        if before.is_none_or(|b| b == mode) || self.notes.song.is_some() || self.preview == Preview::Off {
+            return;
+        }
+        self.stop_run();
+        self.exercise.per_beat = crate::ladder::START.per_beat;
+        if let Some(m) = self.metronome() {
+            m.set_bpm(crate::ladder::START.bpm);
+        }
+    }
+
     /// Marks the tips done that were (see `tips`): notes played on the keyboard with a scale
     /// shown, the metronome started, the falling notes opened.
     fn follow_tips(&mut self) {
@@ -1525,13 +1547,18 @@ impl App {
         };
         let e = run.evenness();
         let clean = crate::ladder::clean(&e);
-        let next = crate::ladder::after(&e, bpm);
-        run.verdict = Some(crate::ladder::verdict(clean, bpm, next));
+        let speed = crate::ladder::Speed {
+            bpm,
+            per_beat: exercise.per_beat,
+        };
+        let next = crate::ladder::after(&e, speed);
+        run.verdict = Some(crate::ladder::verdict(clean, speed, next));
         if let Some(r) = &self.recorder {
             r.record_run(crate::progress::RunRecord {
                 scale: scale.name(),
                 exercise: exercise.id(),
                 bpm,
+                per_beat: exercise.per_beat,
                 played: u32::try_from(e.played).unwrap_or(u32::MAX),
                 notes: u32::try_from(e.notes).unwrap_or(u32::MAX),
                 spread_ms: e.spread_ms,
@@ -1542,7 +1569,14 @@ impl App {
             self.practice_read = None;
         }
         if let Some(m) = self.metronome() {
-            m.set_bpm(next);
+            m.set_bpm(next.bpm);
+        }
+        // Past the fastest click, more notes to a click. The finished run takes the new name,
+        // or it would be taken for a stale one and its results would go.
+        self.exercise.per_beat = next.per_beat;
+        let name = waterfall::exercise_name(scale, self.exercise);
+        if let Some(run) = self.notes.run.as_mut() {
+            run.song.name = name;
         }
     }
 
@@ -2288,6 +2322,25 @@ fn exercise_controls(ui: &mut egui::Ui, exercise: &mut Exercise) {
         .response
         .on_hover_text("How far the scale goes up and back down (contrary motion: at most 2)");
     exercise.octaves = exercise.octaves();
+    let per_beat_text = |n: u8| {
+        if n == 1 {
+            "1 a click".to_owned()
+        } else {
+            format!("{n} a click")
+        }
+    };
+    egui::ComboBox::from_id_salt("exercise per beat")
+        .selected_text(per_beat_text(exercise.per_beat))
+        .show_ui(ui, |ui| {
+            for n in 1..=4u8 {
+                ui.selectable_value(&mut exercise.per_beat, n, per_beat_text(n));
+            }
+        })
+        .response
+        .on_hover_text(
+            "Notes to each click of the metronome. The tempo ladder goes to 2 and then 4 past the \
+             fastest click (208), at half the click tempo, so the scale keeps getting faster",
+        );
 }
 
 fn mode_button(ui: &mut egui::Ui, notes_on: bool, label: &str) -> egui::Response {
@@ -2512,13 +2565,16 @@ fn toggle_favorite(favorites: &mut Vec<String>, id: &str) {
 
 /// The scales in `order`, starred ones first, as a table: star, name, time spent, last
 /// played. Clicking a name shows it; clicking the star (un)marks it as a favorite.
+/// The fastest clean speed per scale name: (clicks a minute, notes to a click).
+type CleanTempos = HashMap<String, (u32, u8)>;
+
 /// The scales window's list. `history`: the practice per scale, and the fastest clean tempo
 /// per scale in `exercise` (the one chosen in Learn Song).
 fn scale_list(
     ui: &mut egui::Ui,
     preview: &mut Preview,
     order: ScaleOrder,
-    history: (&HashMap<String, Practice>, &HashMap<String, u32>, Exercise),
+    history: (&HashMap<String, Practice>, &CleanTempos, Exercise),
     favorites: &mut Vec<String>,
 ) {
     let (practice, clean, exercise) = history;
@@ -2589,7 +2645,10 @@ fn scale_list(
                                 .zip(now)
                                 .map_or_else(|| "–".to_owned(), |(t, n)| ago(n.saturating_sub(t))),
                         );
-                        ui.label(clean.get(&name).map_or_else(|| "–".to_owned(), u32::to_string));
+                        ui.label(clean.get(&name).map_or_else(
+                            || "–".to_owned(),
+                            |&(bpm, per_beat)| crate::ladder::Speed { bpm, per_beat }.short(),
+                        ));
                         ui.end_row();
                     }
                 }
@@ -2847,6 +2906,7 @@ impl eframe::App for App {
         if !self.fitted {
             self.fit_window(ctx);
         }
+        self.follow_mode();
         self.follow_tips();
         self.keep_settings(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {

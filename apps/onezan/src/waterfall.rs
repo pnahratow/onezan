@@ -54,6 +54,9 @@ pub struct Song {
     pub bpm: Option<u32>,
     /// Its key, if the file says (notation programs write it; recordings often do not).
     pub key: Option<Key>,
+    /// Notes to a beat at the most (a scale exercise's; 1 for a file): the judging window
+    /// narrows with it, so a note is never taken for its neighbour.
+    pub per_beat: u8,
 }
 
 /// A key as a MIDI file gives it: its signature's sharps (positive) or flats (negative), and
@@ -106,6 +109,7 @@ impl Song {
     /// The scale played as `exercise` (see [`Exercise::lines`]), a note per beat, with its
     /// fingering, as the keyboard shows it.
     pub fn scale(s: Scale, exercise: Exercise) -> Self {
+        let per_beat = exercise.per_beat.clamp(1, 4);
         let mut notes = Vec::new();
         for (hand, line) in exercise.lines(s) {
             let last = line.len().saturating_sub(1);
@@ -116,8 +120,8 @@ impl Song {
                     finger: Some(finger),
                     velocity: 80,
                     letter: s.letter(key),
-                    beat: f64::from(u32::try_from(i).unwrap_or(u32::MAX)),
-                    len: if i == last { 2.0 } else { 1.0 },
+                    beat: f64::from(u32::try_from(i).unwrap_or(u32::MAX)) / f64::from(per_beat),
+                    len: if i == last { 2.0 } else { 1.0 / f64::from(per_beat) },
                 });
             }
         }
@@ -127,6 +131,7 @@ impl Song {
             notes,
             bpm: None,
             key: None,
+            per_beat,
         }
     }
 
@@ -242,6 +247,7 @@ impl Song {
             name: name.to_owned(),
             notes,
             key,
+            per_beat: 1,
             bpm: tempo.and_then(bpm_of),
         })
     }
@@ -294,13 +300,17 @@ pub fn exercise_name(s: Scale, exercise: Exercise) -> String {
     if exercise == Exercise::default() {
         return s.name();
     }
+    let per_beat = match exercise.per_beat {
+        0 | 1 => String::new(),
+        n => format!(", {n} a beat"),
+    };
     let n = exercise.octaves();
     let octaves = if n == 1 {
         "1 octave".to_owned()
     } else {
         format!("{n} octaves")
     };
-    format!("{}, {}, {octaves}", s.name(), exercise.hands.name())
+    format!("{}, {}, {octaves}{per_beat}", s.name(), exercise.hands.name())
 }
 
 /// The notes of one track (or channel) of a MIDI file.
@@ -594,7 +604,7 @@ impl Run {
             // started on it (a chord played on a click counts it as "one").
             let origin = *self.origin.get_or_insert_with(|| first_count(m) + COUNT_IN);
             self.beat = m - origin;
-            let late = window(bpm);
+            let late = window(bpm, self.song.per_beat);
             for (i, n) in self.song.notes.iter().enumerate() {
                 if n.beat >= self.beat - late {
                     break;
@@ -634,7 +644,7 @@ impl Run {
                     .position(|(n, s)| *s == Status::Coming && n.key == key && (n.beat - step).abs() < 0.05)
             })
         } else {
-            let w = window(bpm);
+            let w = window(bpm, self.song.per_beat);
             self.song
                 .notes
                 .iter()
@@ -682,9 +692,10 @@ fn first_count(m: f64) -> f64 {
     if m - click <= ON_CLICK { click } else { click + 1.0 }
 }
 
-/// How far from its beat a note still counts, in beats.
-fn window(bpm: f64) -> f64 {
-    (ON_TIME_SECS * bpm / 60.0).min(0.45)
+/// How far from its beat a note still counts, in beats: [`ON_TIME_SECS`], but less than half
+/// the way to the next note (`per_beat` notes to a beat).
+fn window(bpm: f64, per_beat: u8) -> f64 {
+    (ON_TIME_SECS * bpm / 60.0).min(0.45 / f64::from(per_beat.max(1)))
 }
 
 const FLASH_SECS: f64 = 0.35;

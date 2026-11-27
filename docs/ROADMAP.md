@@ -43,8 +43,8 @@ version. Each would make onezan a weaker copy of the subscription apps. Say so i
    teaching behind it. Done: hands (together an octave apart, one hand, contrary motion) and
    1 to 4 octaves; evenness after a run (timing, loudness, hands apart, lean); the tempo
    ladder with the fastest clean tempo in the scales window.* Next, from the research:
-   - **Notes per beat (2, 3, 4) at a fixed beat.** The falling scale is one note per beat, so
-     the ladder's top (208) is about 3.5 notes a second, exam grade 4; grade 8 asks about 6.
+   - ~~**Notes per beat (2, 3, 4) at a fixed beat.**~~ Done: past 208 the ladder goes to 2,
+     then 4 notes a click, up to about 10.7 notes a second.
    - **Where the unevenness is:** per position in the scale ("every right-hand thumb is early
      and loud"), the thumb crossings above all.
    - **Rhythm and accent variants** (dotted, reverse-dotted, groups of 3 or 4), then even

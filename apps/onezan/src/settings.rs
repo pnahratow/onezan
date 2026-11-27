@@ -72,6 +72,9 @@ pub struct Settings {
     /// The scale exercise's octaves (1 to 4); missing: 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exercise_octaves: Option<u8>,
+    /// The scale exercise's notes to a click (1 to 4); missing: 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exercise_per_beat: Option<u8>,
     /// How late the player's notes arrive after the click heard, in ms (timing calibration);
     /// missing: not calibrated (0).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -265,6 +268,7 @@ mod tests {
             tips_done: vec!["scale".into(), "metronome".into()],
             exercise_hands: Some("contrary motion".into()),
             exercise_octaves: Some(1),
+            exercise_per_beat: Some(2),
             timing_offset_ms: Some(23.0),
         }
     }
@@ -294,6 +298,7 @@ mod tests {
             tips_done: Vec::new(),
             exercise_hands: None,
             exercise_octaves: None,
+            exercise_per_beat: None,
             timing_offset_ms: None,
             ..sample()
         };

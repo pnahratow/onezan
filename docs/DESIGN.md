@@ -86,8 +86,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         offset (a robust spread decides if it is trusted), saved and taken off
                         every note when judging
   ladder.rs             the tempo ladder: clean (every note on time, timing spread within
-                        ±30 ms) goes up a metronome marking, a near miss stays, many misses
-                        go down
+                        ±30 ms) goes up a step, a near miss stays, many misses go down; steps
+                        are metronome markings at 1, then 2, then 4 notes a click (by notes a
+                        minute); starts at 60 when the scale or exercise changes; stars
   chords.rs             chord names (root, type, inversion, spelling) and a fingering for the held
                         keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both

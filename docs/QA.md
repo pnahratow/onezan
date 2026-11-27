@@ -128,6 +128,21 @@ note when judging. A scale in Learn Song also starts by playing its I chord (any
 | The I chord (e.g. C E G, or E G C) starts the run with the count-in; it is not judged; during a run it does nothing | | |
 | The Options window: "The audio system reports N ms" under JACK, ALSA and WASAPI | | ✓ VM (WASAPI 10 ms) |
 
+### Faster than 208, and the ladder's start (branch `polish-0.3`, 2026-11-27)
+
+Past 208 the ladder keeps the click musical and plays more notes to it: 208 → 108 with two
+notes a click (216 notes a minute), up to 208 ×2, then four a click from 108 to 160 (640 notes a
+minute, about 10.7 a second). A third choice in Learn Song sets it by hand (1 to 4 a click).
+"Clean at" shows e.g. "112 ×2" and compares notes a minute. Changing the scale, the hands or the
+octaves (no song open) starts the ladder again: 60, one note a click.
+
+| Check | Linux | Windows |
+|---|---|---|
+| A clean run at 208 moves to "108, two notes a click": the click slows, the notes come twice as close | | |
+| Two and four notes a click: playable, judged right (the on-time window narrows with the notes) | | |
+| Another scale, hands or octaves: the metronome back at 60, one note a click; a song's tempo untouched | | |
+| "2 a click" control and notes at half-beat spacing | ✓ (shown) | |
+
 ### Results card and count-in (branch `polish-0.3`, 2026-11-27)
 
 The end of a run is a card: five stars in step with the ladder (5 clean with every gauge good,

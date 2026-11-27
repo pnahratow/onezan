@@ -2,6 +2,10 @@
 //! metronome marking, a near miss stays, a run with many notes missed goes one marking down
 //! (teachers raise the tempo gradually and step back when it falls apart: see
 //! docs/research/learning-scales.md, sections 4 and 6). What counts as clean is here.
+//!
+//! Past the fastest marking the click does not get faster: two notes go to each click at half
+//! the tempo (208 → 108, two a beat), later four, as teachers keep the beat and change the
+//! subdivision. The ladder climbs in notes per minute.
 
 use crate::waterfall::Evenness;
 
@@ -10,6 +14,10 @@ pub const MARKINGS: [u32; 39] = [
     40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 63, 66, 69, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120,
     126, 132, 138, 144, 152, 160, 168, 176, 184, 192, 200, 208,
 ];
+
+/// Where the ladder starts for a scale or exercise newly chosen: one note to a click at 60
+/// (teachers start at 40 to 60 to the quarter note; exams' first levels ask about 54 to 60).
+pub const START: Speed = Speed { bpm: 60, per_beat: 1 };
 
 /// The most the timing may spread (its standard deviation) for a clean run, in milliseconds.
 /// onezan's own choice (no teaching source puts a number on it): about 3 to 10 % of the time
@@ -48,35 +56,95 @@ pub fn stars(e: &Evenness) -> u8 {
     }
 }
 
-/// The next marking above `bpm` (`bpm` itself at the top).
-pub fn next(bpm: u32) -> u32 {
-    MARKINGS.into_iter().find(|&m| m > bpm).unwrap_or(bpm)
+/// A step of the ladder: the metronome's tempo, and the notes played to each click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Speed {
+    pub bpm: u32,
+    pub per_beat: u8,
 }
 
-/// The marking below `bpm` (`bpm` itself at the bottom).
-pub fn previous(bpm: u32) -> u32 {
-    MARKINGS.into_iter().rev().find(|&m| m < bpm).unwrap_or(bpm)
+impl Speed {
+    pub fn notes_per_minute(self) -> u32 {
+        self.bpm.saturating_mul(u32::from(self.per_beat.max(1)))
+    }
+
+    /// "88", or "112 ×2" for two notes a click.
+    pub fn short(self) -> String {
+        match self.per_beat {
+            0 | 1 => self.bpm.to_string(),
+            n => format!("{} ×{n}", self.bpm),
+        }
+    }
+
+    /// "88", or "112, two notes a click".
+    pub fn long(self) -> String {
+        match self.per_beat {
+            0 | 1 => self.bpm.to_string(),
+            2 => format!("{}, two notes a click", self.bpm),
+            n => format!("{}, {n} notes a click", self.bpm),
+        }
+    }
 }
 
-/// The tempo after a run at `bpm`: up when clean, the same after a near miss, down after one
+/// The highest tempo with four notes a click: about 10 notes a second.
+const TOP_FOUR: u32 = 160;
+
+/// The ladder's steps, slowest first: every marking with one note a click, then two notes a
+/// click from where that is faster than the fastest one, then four likewise, up to
+/// [`TOP_FOUR`].
+pub fn steps() -> Vec<Speed> {
+    let mut out: Vec<Speed> = Vec::new();
+    for per_beat in [1u8, 2, 4] {
+        for bpm in MARKINGS {
+            let step = Speed { bpm, per_beat };
+            let faster = out
+                .last()
+                .is_none_or(|l| step.notes_per_minute() > l.notes_per_minute());
+            if faster && (per_beat < 4 || bpm <= TOP_FOUR) {
+                out.push(step);
+            }
+        }
+    }
+    out
+}
+
+/// The step after `s` (the first faster one; `s` itself at the top).
+pub fn next(s: Speed) -> Speed {
+    steps()
+        .into_iter()
+        .find(|t| t.notes_per_minute() > s.notes_per_minute())
+        .unwrap_or(s)
+}
+
+/// The step before `s` (the last slower one; `s` itself at the bottom).
+pub fn previous(s: Speed) -> Speed {
+    steps()
+        .into_iter()
+        .rev()
+        .find(|t| t.notes_per_minute() < s.notes_per_minute())
+        .unwrap_or(s)
+}
+
+/// The speed after a run at `s`: up when clean, the same after a near miss, down after one
 /// with many notes missed.
-pub fn after(e: &Evenness, bpm: u32) -> u32 {
+pub fn after(e: &Evenness, s: Speed) -> Speed {
     if clean(e) {
-        return next(bpm);
+        return next(s);
     }
     let on_time = f64::from(u32::try_from(e.played).unwrap_or(u32::MAX));
     let all = f64::from(u32::try_from(e.notes).unwrap_or(u32::MAX));
-    if on_time >= NEAR_MISS * all { bpm } else { previous(bpm) }
+    if on_time >= NEAR_MISS * all { s } else { previous(s) }
 }
 
-/// What the end of a run says about the ladder: clean or not, and the tempo the next run is at.
-pub fn verdict(clean: bool, bpm: u32, next: u32) -> String {
-    match (clean, next.cmp(&bpm)) {
-        (true, std::cmp::Ordering::Greater) => format!("Clean at {bpm}: next {next}"),
-        (true, _) => format!("Clean at {bpm}, the top of the ladder"),
-        (false, std::cmp::Ordering::Less) => format!("Many notes missed: down to {next}"),
+/// What the end of a run says about the ladder: clean or not, and the speed of the next run.
+pub fn verdict(clean: bool, s: Speed, next: Speed) -> String {
+    let (now, then) = (s.long(), next.long());
+    match (clean, next.notes_per_minute().cmp(&s.notes_per_minute())) {
+        (true, std::cmp::Ordering::Greater) => format!("Clean at {now}: next {then}"),
+        (true, _) => format!("Clean at {now}, the top of the ladder"),
+        (false, std::cmp::Ordering::Less) => format!("Many notes missed: down to {then}"),
         (false, _) => {
-            format!("Not clean yet (every note on time, timing within ±{CLEAN_SPREAD_MS:.0} ms): again at {bpm}")
+            format!("Not clean yet (every note on time, timing within ±{CLEAN_SPREAD_MS:.0} ms): again at {now}")
         }
     }
 }
@@ -106,24 +174,53 @@ mod tests {
         assert!(!clean(&run(0, 0, None)));
     }
 
+    fn one(bpm: u32) -> Speed {
+        Speed { bpm, per_beat: 1 }
+    }
+
     #[test]
     fn the_ladder_climbs_by_metronome_markings() {
-        assert_eq!(next(60), 63);
-        assert_eq!(next(61), 63, "between two markings: the next one up");
-        assert_eq!(next(88), 92);
-        assert_eq!(next(20), 40);
-        assert_eq!(next(208), 208, "the top");
+        assert_eq!(next(one(60)), one(63));
+        assert_eq!(next(one(61)), one(63), "between two markings: the next one up");
+        assert_eq!(next(one(88)), one(92));
+        assert_eq!(next(one(20)), one(40));
         assert!(MARKINGS.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]
+    fn past_the_fastest_click_the_notes_per_click_go_up() {
+        let two = |bpm| Speed { bpm, per_beat: 2 };
+        let four = |bpm| Speed { bpm, per_beat: 4 };
+        assert_eq!(next(one(208)), two(108), "208 a minute, then 216");
+        assert_eq!(next(two(108)), two(112));
+        assert_eq!(next(two(208)), four(108), "416, then 432");
+        assert_eq!(next(four(160)), four(160), "the top: 640 notes a minute");
+        assert_eq!(previous(two(108)), one(208));
+        // Every step faster than the one before.
+        let s = steps();
+        assert!(s.windows(2).all(|w| w[0].notes_per_minute() < w[1].notes_per_minute()));
+        // Three notes a click (chosen by hand) climbs to the next step that is faster.
+        assert_eq!(next(Speed { bpm: 80, per_beat: 3 }), two(126), "240, then 252");
+        assert_eq!(two(112).short(), "112 ×2");
+        assert_eq!(two(112).long(), "112, two notes a click");
+    }
+
+    #[test]
     fn a_near_miss_stays_and_many_misses_step_down() {
-        assert_eq!(after(&run(29, 29, Some(15.0)), 88), 92, "clean: up");
-        assert_eq!(after(&run(29, 29, Some(40.0)), 88), 88, "all on time but uneven: stays");
-        assert_eq!(after(&run(27, 29, Some(15.0)), 88), 88, "two missed of 29: stays");
-        assert_eq!(after(&run(20, 29, Some(15.0)), 88), 84, "nine missed: down");
-        assert_eq!(after(&run(0, 29, None), 40), 40, "the bottom");
-        assert_eq!(previous(63), 60);
+        assert_eq!(after(&run(29, 29, Some(15.0)), one(88)), one(92), "clean: up");
+        assert_eq!(
+            after(&run(29, 29, Some(40.0)), one(88)),
+            one(88),
+            "all on time but uneven: stays"
+        );
+        assert_eq!(
+            after(&run(27, 29, Some(15.0)), one(88)),
+            one(88),
+            "two missed of 29: stays"
+        );
+        assert_eq!(after(&run(20, 29, Some(15.0)), one(88)), one(84), "nine missed: down");
+        assert_eq!(after(&run(0, 29, None), one(40)), one(40), "the bottom");
+        assert_eq!(previous(one(63)), one(60));
     }
 
     #[test]
@@ -148,7 +245,7 @@ mod tests {
             run(29, 29, Some(25.0)),
             run(27, 29, Some(15.0)),
         ] {
-            assert_eq!(stars(&e) >= 4, after(&e, 88) > 88);
+            assert_eq!(stars(&e) >= 4, after(&e, one(88)) != one(88));
         }
     }
 
@@ -177,9 +274,14 @@ mod tests {
 
     #[test]
     fn the_verdict_says_where_the_next_run_is() {
-        assert_eq!(verdict(true, 88, 92), "Clean at 88: next 92");
-        assert!(verdict(false, 88, 88).ends_with("again at 88"));
-        assert!(verdict(true, 208, 208).contains("top"));
-        assert_eq!(verdict(false, 88, 84), "Many notes missed: down to 84");
+        assert_eq!(verdict(true, one(88), one(92)), "Clean at 88: next 92");
+        assert!(verdict(false, one(88), one(88)).ends_with("again at 88"));
+        let top = Speed { bpm: 160, per_beat: 4 };
+        assert!(verdict(true, top, top).contains("top"));
+        assert_eq!(verdict(false, one(88), one(84)), "Many notes missed: down to 84");
+        assert_eq!(
+            verdict(true, one(208), Speed { bpm: 108, per_beat: 2 }),
+            "Clean at 208: next 108, two notes a click"
+        );
     }
 }

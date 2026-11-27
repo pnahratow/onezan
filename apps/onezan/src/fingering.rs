@@ -372,6 +372,9 @@ impl Hands {
 pub struct Exercise {
     pub hands: Hands,
     pub octaves: u8,
+    /// Notes to each click of the metronome: 1 to 4 (the tempo ladder goes to 2 and 4 past
+    /// the fastest click).
+    pub per_beat: u8,
 }
 
 impl Default for Exercise {
@@ -379,6 +382,7 @@ impl Default for Exercise {
         Self {
             hands: Hands::Together,
             octaves: 2,
+            per_beat: 1,
         }
     }
 }
@@ -940,7 +944,11 @@ mod tests {
     }
 
     fn ex(hands: Hands, octaves: u8) -> Exercise {
-        Exercise { hands, octaves }
+        Exercise {
+            hands,
+            octaves,
+            per_beat: 1,
+        }
     }
 
     #[test]

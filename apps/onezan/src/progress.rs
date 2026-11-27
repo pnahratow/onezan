@@ -150,7 +150,8 @@ fn open_checked(path: &Path) -> rusqlite::Result<Connection> {
             t_ms INTEGER NOT NULL,      -- when it ended, in ms since 1970 (UTC)
             scale TEXT NOT NULL,        -- e.g. 'D major'
             exercise TEXT NOT NULL,     -- e.g. 'hands together/2' (hands/octaves)
-            bpm INTEGER NOT NULL,
+            bpm INTEGER NOT NULL,       -- the metronome's clicks a minute
+            per_beat INTEGER NOT NULL DEFAULT 1, -- notes to a click
             played INTEGER NOT NULL,    -- notes on time
             notes INTEGER NOT NULL,
             spread_ms REAL,             -- the timing's standard deviation
@@ -160,6 +161,15 @@ fn open_checked(path: &Path) -> rusqlite::Result<Connection> {
         CREATE INDEX IF NOT EXISTS runs_by_exercise ON runs (exercise, scale);
         PRAGMA user_version = 2;",
     )?;
+    // A runs table from before notes per click were kept (never released) gets the column.
+    let has_per_beat: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('runs') WHERE name = 'per_beat')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_per_beat {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN per_beat INTEGER NOT NULL DEFAULT 1;")?;
+    }
     Ok(conn)
 }
 
@@ -215,6 +225,8 @@ pub struct RunRecord {
     /// The exercise's id: `hands/octaves`, e.g. "contrary motion/2".
     pub exercise: String,
     pub bpm: u32,
+    /// Notes to a click.
+    pub per_beat: u8,
     pub played: u32,
     pub notes: u32,
     pub spread_ms: Option<f64>,
@@ -224,13 +236,14 @@ pub struct RunRecord {
 
 fn write_run(conn: &Connection, t_ms: i64, r: &RunRecord) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO runs (t_ms, scale, exercise, bpm, played, notes, spread_ms, loudness, clean)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO runs (t_ms, scale, exercise, bpm, per_beat, played, notes, spread_ms, loudness, clean)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             t_ms,
             r.scale,
             r.exercise,
             r.bpm,
+            r.per_beat,
             r.played,
             r.notes,
             r.spread_ms,
@@ -241,9 +254,10 @@ fn write_run(conn: &Connection, t_ms: i64, r: &RunRecord) -> rusqlite::Result<()
     Ok(())
 }
 
-/// The fastest tempo each scale was played clean at in `exercise` (its id), by scale name.
-pub fn clean_tempos(path: &Path, exercise: &str) -> HashMap<String, u32> {
-    let read = || -> rusqlite::Result<HashMap<String, u32>> {
+/// The fastest each scale was played clean in `exercise` (its id), by scale name: (clicks a
+/// minute, notes to a click), the most notes a minute.
+pub fn clean_tempos(path: &Path, exercise: &str) -> HashMap<String, (u32, u8)> {
+    let read = || -> rusqlite::Result<HashMap<String, (u32, u8)>> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         // A history from before runs were kept has no such table.
         let has_runs: bool = conn.query_row(
@@ -254,9 +268,14 @@ pub fn clean_tempos(path: &Path, exercise: &str) -> HashMap<String, u32> {
         if !has_runs {
             return Ok(HashMap::new());
         }
-        let mut stmt =
-            conn.prepare("SELECT scale, MAX(bpm) FROM runs WHERE clean = 1 AND exercise = ?1 GROUP BY scale")?;
-        let rows = stmt.query_map([exercise], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        // SQLite's MAX picks the row its other columns come from.
+        let mut stmt = conn.prepare(
+            "SELECT scale, bpm, per_beat, MAX(bpm * per_beat) FROM runs
+             WHERE clean = 1 AND exercise = ?1 GROUP BY scale",
+        )?;
+        let rows = stmt.query_map([exercise], |r| {
+            Ok((r.get::<_, String>(0)?, (r.get::<_, u32>(1)?, r.get::<_, u8>(2)?)))
+        })?;
         rows.collect()
     };
     if !path.exists() {
@@ -440,6 +459,7 @@ mod tests {
             scale: scale.into(),
             exercise: exercise.into(),
             bpm,
+            per_beat: 1,
             played: 29,
             notes: 29,
             spread_ms: Some(20.0),
@@ -451,15 +471,22 @@ mod tests {
         rec.record_run(run("C major", "hands together/2", 96, false));
         rec.record_run(run("C major", "contrary motion/2", 60, true));
         rec.record_run(run("G major", "hands together/2", 72, true));
+        // Two notes a click at 112 is faster than one at 208.
+        rec.record_run(RunRecord {
+            per_beat: 2,
+            ..run("D major", "hands together/2", 112, true)
+        });
+        rec.record_run(run("D major", "hands together/2", 208, true));
         drop(rec);
         let together = clean_tempos(&path, "hands together/2");
         assert_eq!(
             together.get("C major"),
-            Some(&88),
+            Some(&(88, 1)),
             "the fastest clean one, not the faster unclean"
         );
-        assert_eq!(together.get("G major"), Some(&72));
-        assert_eq!(clean_tempos(&path, "contrary motion/2").get("C major"), Some(&60));
+        assert_eq!(together.get("G major"), Some(&(72, 1)));
+        assert_eq!(together.get("D major"), Some(&(112, 2)));
+        assert_eq!(clean_tempos(&path, "contrary motion/2").get("C major"), Some(&(60, 1)));
         assert!(clean_tempos(&path, "right hand/1").is_empty());
     }
 
