@@ -1602,18 +1602,7 @@ impl App {
                 },
                 20.0,
             ),
-            Some(r) if r.finished() => {
-                let verdict = r.verdict.as_deref().filter(|v| !v.is_empty());
-                big(
-                    format!(
-                        "{}\n{}best streak {}  ·  {start}: again",
-                        r.evenness().summary(r.wait),
-                        verdict.map_or_else(String::new, |v| format!("{v}\n")),
-                        r.best_streak
-                    ),
-                    20.0,
-                );
-            }
+            Some(r) if r.finished() => results_card(&painter, area, r, &start),
             Some(r) if !r.wait && r.beat() < 0.0 => {
                 #[expect(clippy::cast_possible_truncation, reason = "a count-in of a few beats")]
                 #[expect(clippy::as_conversions, reason = "no as-free f64 to i64 conversion")]
@@ -2048,6 +2037,147 @@ impl TapTempo {
 /// The bar's switch between the instrument and the falling notes: filled in the accent colour,
 /// with an icon for where it leads (falling notes, or an instrument's sliders), so it stands
 /// out from the other buttons.
+const GOOD: Color32 = Color32::from_rgb(74, 222, 128);
+const FAIR: Color32 = Color32::from_rgb(250, 204, 21);
+const POOR: Color32 = Color32::from_rgb(239, 68, 68);
+
+const fn grade_colour(g: waterfall::Grade) -> Color32 {
+    match g {
+        waterfall::Grade::Good => GOOD,
+        waterfall::Grade::Fair => FAIR,
+        waterfall::Grade::Poor => POOR,
+    }
+}
+
+/// The end of a run, over the falling notes: stars (as the tempo ladder rates it), how many
+/// notes were on time and what the ladder does, a gauge per measure, and how to go again.
+fn results_card(painter: &egui::Painter, area: egui::Rect, run: &Run, again: &str) {
+    let e = run.evenness();
+    let gauges = e.gauges();
+    let rows = f32::from(u16::try_from(gauges.len()).unwrap_or(0));
+    let width = (area.width() - 32.0).min(560.0);
+    let height = 30.0f32.mul_add(rows, 168.0).min(area.height() - 8.0);
+    let card = egui::Rect::from_center_size(area.center(), egui::vec2(width, height));
+    painter.rect_filled(card, 12.0, Color32::from_rgba_unmultiplied(14, 14, 20, 238));
+    painter.rect_stroke(
+        card,
+        12.0,
+        egui::Stroke::new(1.0, Color32::from_gray(70)),
+        egui::StrokeKind::Inside,
+    );
+    let centre = |y: f32, text: String, size: f32, colour: Color32| {
+        painter.text(
+            egui::pos2(card.center().x, y),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(size),
+            colour,
+        );
+    };
+    let mut y = card.top() + 32.0;
+    // Stars: as many lit as earned, of three (playing along; waiting has no timing to rate).
+    if !run.wait {
+        let earned = crate::ladder::stars(&e);
+        for i in 0..3u8 {
+            let x = f32::from(i).mul_add(40.0, card.center().x - 40.0);
+            let (star, colour) = if i < earned {
+                ("★", Color32::from_rgb(250, 204, 21))
+            } else {
+                ("☆", Color32::from_gray(90))
+            };
+            painter.text(
+                egui::pos2(x, y),
+                egui::Align2::CENTER_CENTER,
+                star,
+                egui::FontId::proportional(34.0),
+                colour,
+            );
+        }
+        y += 38.0;
+    }
+    let (played, notes) = (e.played, e.notes);
+    let how = if run.wait { "played" } else { "on time" };
+    centre(
+        y,
+        format!("{played} of {notes} notes {how}"),
+        18.0,
+        Color32::from_gray(235),
+    );
+    y += 24.0;
+    if let Some(v) = run.verdict.as_deref().filter(|v| !v.is_empty()) {
+        centre(y, v.to_owned(), 15.0, Color32::from_gray(190));
+        y += 22.0;
+    }
+    y += 8.0;
+    // A gauge per measure: label, a track with its good / fair / poor zones and a marker,
+    // the value.
+    let (left, right) = (card.left() + 20.0, card.right() - 20.0);
+    for g in &gauges {
+        gauge_row(painter, g, y, (left, right));
+        y += 30.0;
+    }
+    y += 10.0;
+    centre(
+        y,
+        format!("best streak {}  ·  {again}: again", run.best_streak),
+        14.0,
+        Color32::from_gray(160),
+    );
+}
+
+/// One gauge of [`results_card`] at height `y` between `left` and `right`: its label, a track
+/// with its good / fair / poor zones and a marker at the value, and the value in its grade's
+/// colour.
+fn gauge_row(painter: &egui::Painter, g: &waterfall::Gauge, y: f32, (left, right): (f32, f32)) {
+    let track = egui::Rangef::new(left + 150.0, right - 110.0);
+    painter.text(
+        egui::pos2(left, y),
+        egui::Align2::LEFT_CENTER,
+        g.label,
+        egui::FontId::proportional(14.0),
+        Color32::from_gray(200),
+    );
+    let x_of = |v: f64| {
+        #[expect(clippy::cast_possible_truncation, reason = "a fraction of a gauge, small")]
+        #[expect(clippy::as_conversions, reason = "no as-free f64 to f32 conversion")]
+        let f = (v / g.max) as f32;
+        if g.centred {
+            (track.span() / 2.0).mul_add(f.clamp(-1.0, 1.0), track.center())
+        } else {
+            track.span().mul_add(f.clamp(0.0, 1.0), track.min)
+        }
+    };
+    let zone = |from: f64, to: f64, colour: Color32| {
+        let r = egui::Rect::from_x_y_ranges(x_of(from)..=x_of(to), (y - 4.0)..=(y + 4.0));
+        painter.rect_filled(r, 2.0, colour.gamma_multiply(0.35));
+    };
+    let zones = [(0.0, g.good, GOOD), (g.good, g.fair, FAIR), (g.fair, g.max, POOR)];
+    for (from, to, colour) in zones {
+        zone(from, to, colour);
+        if g.centred {
+            zone(-to, -from, colour);
+        }
+    }
+    if g.centred {
+        painter.vline(
+            track.center(),
+            (y - 8.0)..=(y + 8.0),
+            egui::Stroke::new(1.0, Color32::from_gray(150)),
+        );
+    }
+    let colour = grade_colour(g.grade());
+    let x = x_of(g.value);
+    painter.circle_filled(egui::pos2(x, y), 6.0, colour);
+    painter.circle_stroke(egui::pos2(x, y), 6.0, egui::Stroke::new(1.5, Color32::from_gray(20)));
+    painter.text(
+        egui::pos2(right, y),
+        egui::Align2::RIGHT_CENTER,
+        &g.text,
+        egui::FontId::proportional(14.0),
+        colour,
+    );
+}
+
 /// The timing calibration as the Options window shows it.
 struct CalibrationState<'a> {
     /// While it goes: the clicks measured so far.

@@ -414,34 +414,101 @@ fn mean_and_spread(values: &[f64]) -> Option<(f64, f64)> {
     Some((mean, var.sqrt()))
 }
 
+/// How a measure of a run rates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grade {
+    Good,
+    Fair,
+    Poor,
+}
+
+/// One measure of a run, for a gauge: its value on a scale, how it rates, and its text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gauge {
+    pub label: &'static str,
+    pub value: f64,
+    /// The scale: 0 to `max`, or `-max` to `max` when `centred` (early to late).
+    pub max: f64,
+    pub centred: bool,
+    /// Up to here (from 0, either way when centred) good; up to `fair` fair; beyond poor.
+    pub good: f64,
+    pub fair: f64,
+    pub text: String,
+}
+
+impl Gauge {
+    pub fn grade(&self) -> Grade {
+        let v = self.value.abs();
+        if v <= self.good {
+            Grade::Good
+        } else if v <= self.fair {
+            Grade::Fair
+        } else {
+            Grade::Poor
+        }
+    }
+}
+
 /// An offset leaning less than this either way is not mentioned.
 const LEAN_MS: f64 = 10.0;
 
 impl Evenness {
-    /// One line: "28 of 29 on time · timing ±14 ms · loudness ±5 · hands 9 ms apart · a little
-    /// late".
-    pub fn summary(&self, wait: bool) -> String {
-        let mut parts = vec![format!(
-            "{} of {} {}",
-            self.played,
-            self.notes,
-            if wait { "played" } else { "on time" }
-        )];
+    /// Its measures as gauges, those it knows: timing evenness, early or late, loudness
+    /// evenness, the hands together. The timing's fair edge is the tempo ladder's clean limit.
+    pub fn gauges(&self) -> Vec<Gauge> {
+        let mut out = Vec::new();
         if let Some(s) = self.spread_ms {
-            parts.push(format!("timing ±{s:.0} ms"));
+            out.push(Gauge {
+                label: "Timing evenness",
+                value: s,
+                max: 60.0,
+                centred: false,
+                good: 20.0,
+                fair: crate::ladder::CLEAN_SPREAD_MS,
+                text: format!("±{s:.0} ms"),
+            });
         }
-        if let Some(l) = self.loudness {
-            parts.push(format!("loudness ±{l:.0}"));
+        if let Some(l) = self.lean_ms {
+            let text = if l.abs() < LEAN_MS {
+                "on the beat".to_owned()
+            } else if l > 0.0 {
+                format!("{l:.0} ms late")
+            } else {
+                format!("{:.0} ms early", -l)
+            };
+            out.push(Gauge {
+                label: "Early · late",
+                value: l,
+                max: 60.0,
+                centred: true,
+                good: LEAN_MS,
+                fair: 25.0,
+                text,
+            });
+        }
+        if let Some(v) = self.loudness {
+            out.push(Gauge {
+                label: "Loudness evenness",
+                value: v,
+                max: 20.0,
+                centred: false,
+                good: 6.0,
+                fair: 10.0,
+                text: format!("±{v:.0}"),
+            });
         }
         if let Some(h) = self.hands_apart_ms {
-            parts.push(format!("hands {h:.0} ms apart"));
+            out.push(Gauge {
+                label: "Hands together",
+                value: h,
+                max: 60.0,
+                centred: false,
+                good: 15.0,
+                fair: 30.0,
+                text: format!("{h:.0} ms apart"),
+            });
         }
-        match self.lean_ms {
-            Some(l) if l >= LEAN_MS => parts.push(format!("a little late (+{l:.0} ms)")),
-            Some(l) if l <= -LEAN_MS => parts.push(format!("a little early ({l:.0} ms)")),
-            _ => {}
-        }
-        parts.join("  ·  ")
+        out
     }
 }
 
@@ -523,8 +590,9 @@ impl Run {
             let to = self.beat + beats.max(0.0);
             self.beat = next.map_or(to, |n| to.min(n));
         } else if let Some(m) = metronome {
-            // The song starts COUNT_IN beats after the next click.
-            let origin = *self.origin.get_or_insert_with(|| m.max(0.0).ceil() + COUNT_IN);
+            // The song starts COUNT_IN clicks on: from the next click, or from this one when
+            // started on it (a chord played on a click counts it as "one").
+            let origin = *self.origin.get_or_insert_with(|| first_count(m) + COUNT_IN);
             self.beat = m - origin;
             let late = window(bpm);
             for (i, n) in self.song.notes.iter().enumerate() {
@@ -602,6 +670,16 @@ impl Run {
         self.flashes.push((key, hit, time));
         hit
     }
+}
+
+/// Started this close after a click (in beats), the count-in counts that click.
+const ON_CLICK: f64 = 0.25;
+
+/// The metronome beat the count-in starts from, started at beat `m`.
+fn first_count(m: f64) -> f64 {
+    let m = m.max(0.0);
+    let click = m.floor();
+    if m - click <= ON_CLICK { click } else { click + 1.0 }
 }
 
 /// How far from its beat a note still counts, in beats.
@@ -991,13 +1069,8 @@ mod tests {
         // The right hand 20 ms after the left on every beat.
         assert!((e.hands_apart_ms.unwrap() - 20.0).abs() < 0.5, "{e:?}");
         assert!(e.loudness.unwrap() > 4.0 && e.loudness.unwrap() < 6.0, "{e:?}");
-        let text = e.summary(false);
-        assert!(text.starts_with("8 of 58 on time"), "{text}");
-        assert!(
-            text.contains("timing ±12 ms") && text.contains("hands 20 ms apart"),
-            "{text}"
-        );
-        assert!(text.contains("a little late (+10 ms)"), "{text}");
+        let texts: Vec<String> = e.gauges().into_iter().map(|g| g.text).collect();
+        assert_eq!(texts, ["±12 ms", "10 ms late", "±5", "20 ms apart"]);
     }
 
     #[test]
@@ -1005,10 +1078,23 @@ mod tests {
         let r = Run::new(c_major(), true);
         let e = r.evenness();
         assert_eq!((e.spread_ms, e.loudness, e.hands_apart_ms), (None, None, None));
-        assert_eq!(e.summary(true), "0 of 58 played");
+        assert_eq!(e.gauges().len(), 0);
+        assert_eq!((e.played, e.notes), (0, 58));
     }
 
     fn r_notes(r: &Run, hand: Hand) -> Vec<u8> {
         r.song.notes.iter().filter(|n| n.hand == hand).map(|n| n.key).collect()
+    }
+
+    #[test]
+    fn the_count_in_is_four_clicks_however_the_run_is_started() {
+        // Switched on with the run: the first click is the first count.
+        assert!((first_count(0.0) - 0.0).abs() < 1e-9);
+        assert!((first_count(-0.02) - 0.0).abs() < 1e-9, "a click about to be heard");
+        // Already ticking, started on a click (a chord played in time): that click counts.
+        assert!((first_count(12.03) - 12.0).abs() < 1e-9);
+        // Started between clicks (Space at any moment): from the next one.
+        assert!((first_count(12.5) - 13.0).abs() < 1e-9);
+        assert!((first_count(12.9) - 13.0).abs() < 1e-9);
     }
 }

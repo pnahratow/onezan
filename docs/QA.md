@@ -128,6 +128,20 @@ note when judging. A scale in Learn Song also starts by playing its I chord (any
 | The I chord (e.g. C E G, or E G C) starts the run with the count-in; it is not judged; during a run it does nothing | | |
 | The Options window: "The audio system reports N ms" under JACK, ALSA and WASAPI | | ✓ VM (WASAPI 10 ms) |
 
+### Results card and count-in (branch `polish-0.3`, 2026-11-27)
+
+The end of a run is a card: stars as the ladder rates it (3 clean, 2 near miss, 1 most notes on
+time), the notes on time and the ladder's verdict, and a gauge per measure (timing evenness,
+early/late, loudness evenness, hands together) with green / yellow / red zones. A run started
+on a click (a chord played in time) counts that click as "one": four clicks of count-in either
+way. Not yet seen drawn: the VM has no keyboard, and mouse clicks there were not timed well
+enough to finish a run.
+
+| Check | Linux | Windows |
+|---|---|---|
+| The card: readable, fits the window, stars and gauges match how it went | | |
+| Count-in: four clicks with Space and with the I chord, metronome on or off before | | |
+
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
 "earlier": STATUS.md listed these for real Windows only.

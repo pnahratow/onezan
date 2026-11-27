@@ -25,6 +25,21 @@ pub fn clean(e: &Evenness) -> bool {
     e.notes > 0 && e.played == e.notes && e.spread_ms.is_some_and(|s| s <= CLEAN_SPREAD_MS)
 }
 
+/// Stars for a run, 0 to 3, as the ladder sees it: 3 clean (up a marking), 2 a near miss
+/// (stays), 1 most notes on time, 0 fewer.
+pub fn stars(e: &Evenness) -> u8 {
+    let share = |part: usize| {
+        f64::from(u32::try_from(part).unwrap_or(u32::MAX)) / f64::from(u32::try_from(e.notes.max(1)).unwrap_or(1))
+    };
+    if clean(e) {
+        3
+    } else if share(e.played) >= NEAR_MISS {
+        2
+    } else {
+        u8::from(share(e.played) >= 0.6)
+    }
+}
+
 /// The next marking above `bpm` (`bpm` itself at the top).
 pub fn next(bpm: u32) -> u32 {
     MARKINGS.into_iter().find(|&m| m > bpm).unwrap_or(bpm)
@@ -101,6 +116,38 @@ mod tests {
         assert_eq!(after(&run(20, 29, Some(15.0)), 88), 84, "nine missed: down");
         assert_eq!(after(&run(0, 29, None), 40), 40, "the bottom");
         assert_eq!(previous(63), 60);
+    }
+
+    #[test]
+    fn stars_follow_the_ladder() {
+        assert_eq!(stars(&run(29, 29, Some(15.0))), 3, "clean");
+        assert_eq!(stars(&run(29, 29, Some(40.0))), 2, "all on time but uneven");
+        assert_eq!(stars(&run(27, 29, Some(15.0))), 2, "a near miss");
+        assert_eq!(stars(&run(20, 29, Some(15.0))), 1);
+        assert_eq!(stars(&run(10, 29, Some(15.0))), 0);
+    }
+
+    #[test]
+    fn gauges_rate_each_measure() {
+        use crate::waterfall::Grade;
+        let mut e = run(29, 29, Some(14.0));
+        e.lean_ms = Some(-18.0);
+        e.hands_apart_ms = Some(40.0);
+        let g = e.gauges();
+        let find = |label: &str| g.iter().find(|x| x.label == label).unwrap();
+        assert_eq!(find("Timing evenness").grade(), Grade::Good);
+        assert_eq!(find("Early · late").grade(), Grade::Fair);
+        assert_eq!(find("Early · late").text, "18 ms early");
+        assert_eq!(find("Loudness evenness").grade(), Grade::Good);
+        assert_eq!(find("Hands together").grade(), Grade::Poor);
+        // Waiting has no timing: loudness only.
+        let w = Evenness {
+            spread_ms: None,
+            lean_ms: None,
+            hands_apart_ms: None,
+            ..e
+        };
+        assert_eq!(w.gauges().len(), 1);
     }
 
     #[test]
