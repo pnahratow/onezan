@@ -1684,7 +1684,8 @@ impl App {
                 .clicked();
             if let Some(note) = &self.notes.song_note {
                 ui.label(RichText::new(note).color(Color32::from_rgb(239, 68, 68)));
-            } else if self.notes.song.is_none() {
+            } else if self.notes.song.is_none() && self.notes.run.is_none() {
+                // Not once a run has a score to show at the row's end.
                 ui.label(RichText::new("or drop a MIDI file here. Until then, the chosen scale falls.").weak());
             }
             if let Some(r) = &self.notes.run {

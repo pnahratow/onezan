@@ -134,12 +134,12 @@ The end of a run is a card: stars as the ladder rates it (3 clean, 2 near miss, 
 time), the notes on time and the ladder's verdict, and a gauge per measure (timing evenness,
 early/late, loudness evenness, hands together) with green / yellow / red zones. A run started
 on a click (a chord played in time) counts that click as "one": four clicks of count-in either
-way. Not yet seen drawn: the VM has no keyboard, and mouse clicks there were not timed well
-enough to finish a run.
+way. Seen drawn on the VM with a run played by mouse (few notes on time: mouse clicks are
+seen once a frame, MIDI keys to the millisecond); not yet with a good run from a keyboard.
 
 | Check | Linux | Windows |
 |---|---|---|
-| The card: readable, fits the window, stars and gauges match how it went | | |
+| The card: readable, fits the window, stars and gauges match how it went | | drawn ✓ VM (a poor run) |
 | Count-in: four clicks with Space and with the I chord, metronome on or off before | | |
 
 ### From before the branch (listed in STATUS.md until 2026-11-27)

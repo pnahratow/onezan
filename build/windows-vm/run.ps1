@@ -3,6 +3,8 @@
 #   click X Y           left click at screen pixel X Y
 #   keys TEXT           SendKeys syntax (e.g. " " for Space, "{ESC}")
 #   sleep N             seconds
+#   mark                start a stopwatch
+#   at T                wait until T seconds after the mark (timing that does not drift)
 #   shot NAME           screenshot to qa\NAME.png
 #   top                 move onezan's main window to the top left, in front
 #   place X Y TITLE     move the window titled TITLE to X Y, in front
@@ -43,6 +45,12 @@ foreach ($line in Get-Content "$qa\steps.txt") {
     }
     'keys' { [System.Windows.Forms.SendKeys]::SendWait($w[1]) }
     'sleep' { Start-Sleep -Seconds ([double]$w[1]) }
+    'mark' { $watch = [System.Diagnostics.Stopwatch]::StartNew() }
+    'at' {
+      $until = [double]$w[1]
+      while ($watch.Elapsed.TotalSeconds -lt $until - 0.02) { Start-Sleep -Milliseconds 5 }
+      while ($watch.Elapsed.TotalSeconds -lt $until) { }
+    }
     'shot' {
       $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
       $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
