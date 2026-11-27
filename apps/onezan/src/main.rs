@@ -179,11 +179,10 @@ fn list(all: bool) {
     let scan = installed();
     let shown: Vec<_> = scan.plugins.iter().filter(|p| all || p.is_instrument()).collect();
     if shown.is_empty() {
-        println!(
-            "no VST3 {}found in {:?}",
-            if all { "" } else { "instruments " },
-            onezan_vst3_host::default_search_paths()
-        );
+        println!("no VST3 {}found in:", if all { "" } else { "instruments " });
+        for dir in onezan_vst3_host::default_search_paths() {
+            println!("  {}", dir.display());
+        }
     }
     if crate::piano::available() {
         println!(

@@ -338,7 +338,7 @@ fn audio_sections(audio: &AudioOut) -> Vec<Section> {
         considered: audio.considered.clone(),
         detail: audio_detail(audio),
         short: audio_short(audio),
-        hint: "choose another in the window (click Audio)",
+        hint: "choose another in the window (Options, Audio output)",
     }];
     if let Some(t) = audio.midi_timing() {
         sections.push(Section {
@@ -346,7 +346,7 @@ fn audio_sections(audio: &AudioOut) -> Vec<Section> {
             short: audio.timing_mode().map_or_else(String::new, |m| m.name().to_string()),
             considered: t,
             detail: String::new(),
-            hint: "choose with --midi-timing exact|immediate|auto, or in the window (click Timing)",
+            hint: "choose with --midi-timing exact|immediate|auto, or in the window (Options, MIDI timing)",
         });
     }
     sections

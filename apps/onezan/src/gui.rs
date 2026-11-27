@@ -39,6 +39,30 @@ const SAVE_DELAY: Duration = Duration::from_secs(1);
 /// The window's size at the first start.
 const DEFAULT_SIZE: [f32; 2] = [1200.0, 760.0];
 const MIN_SIZE: [f32; 2] = [640.0, 420.0];
+/// Room left on the screen around the window (its frame and title bar aside), in points: a
+/// little at the sides, the task bar's height and some below.
+const SCREEN_MARGIN: [f32; 2] = [16.0, 64.0];
+
+/// The window's inner size `want`, made smaller where the window (with its `frame`: title bar
+/// and borders) would not fit on a `monitor` of that size; never below [`MIN_SIZE`].
+fn fit_on_screen(want: egui::Vec2, frame: egui::Vec2, monitor: egui::Vec2) -> egui::Vec2 {
+    let room = egui::vec2(
+        monitor.x - frame.x - SCREEN_MARGIN[0],
+        monitor.y - frame.y - SCREEN_MARGIN[1],
+    );
+    want.min(room).max(egui::Vec2::from(MIN_SIZE))
+}
+
+/// The size of the window's frame (outer minus inner size) and of its monitor, in points, once
+/// the system has told them.
+fn frame_and_monitor(ctx: &egui::Context) -> Option<(egui::Vec2, egui::Vec2)> {
+    ctx.input(|i| {
+        let v = i.viewport();
+        let monitor = v.monitor_size.filter(|m| m.x > 1.0 && m.y > 1.0)?;
+        let (outer, inner) = (v.outer_rect?.size(), v.inner_rect?.size());
+        Some((egui::vec2(outer.x - inner.x, outer.y - inner.y), monitor))
+    })
+}
 
 /// The embedded editor, shared by the window and the loop that services it (UI thread only).
 type Shared = Rc<RefCell<Option<Embedded>>>;
@@ -176,6 +200,8 @@ struct App {
     editor_note: Option<String>,
     /// The window was sized to the editor once (or has a saved size, which wins).
     sized: bool,
+    /// The window was checked against the screen's size once (and made smaller if too big).
+    fitted: bool,
     session: Option<Session>,
     /// Why there is no session.
     error: Option<String>,
@@ -338,6 +364,7 @@ impl App {
             embedded,
             editor_note,
             sized: settings.window.is_some(),
+            fitted: false,
             session,
             error,
             keys,
@@ -700,6 +727,27 @@ impl App {
         self.session = session;
     }
 
+    /// Once, as soon as the screen's size is known: a window bigger than the screen (the default
+    /// size on a small screen, or a size saved on a bigger one) is made to fit and moved to the
+    /// top, centred, so the bar and the keyboard are on screen.
+    fn fit_window(&mut self, ctx: &egui::Context) {
+        let Some((frame, monitor)) = frame_and_monitor(ctx) else {
+            return;
+        };
+        self.fitted = true;
+        let Some(inner) = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size())) else {
+            return;
+        };
+        let fitted = fit_on_screen(inner, frame, monitor);
+        if fitted == inner {
+            return;
+        }
+        log::info!("the window ({inner:?}) does not fit on the screen ({monitor:?}): now {fitted:?}");
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(fitted));
+        let x = ((monitor.x - fitted.x - frame.x) / 2.0).max(0.0);
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, 0.0)));
+    }
+
     /// The installed instruments, in a window of their own: click one to switch to it.
     fn instruments_window(&mut self, ctx: &egui::Context) {
         let scan = self.instruments.get_or_insert_with(|| {
@@ -879,8 +927,11 @@ impl App {
                 self.sized = true;
                 let (w, h) = (f32::from(to_u16(e.size.0)) / ppp, f32::from(to_u16(e.size.1)) / ppp);
                 let other = ui.ctx().content_rect().height() - r.height();
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w.max(640.0), h + other)));
+                let mut size = egui::vec2(w.max(640.0), h + other);
+                if let Some((frame, monitor)) = frame_and_monitor(ui.ctx()) {
+                    size = fit_on_screen(size, frame, monitor);
+                }
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             }
             e.place(area);
             return;
@@ -1752,10 +1803,14 @@ fn mode_button(ui: &mut egui::Ui, notes_on: bool, label: &str) -> egui::Response
     let font = egui::FontId::proportional(14.0);
     let text = ui.painter().layout_no_wrap(label.to_owned(), font, Color32::WHITE);
     let (icon, pad, h): (f32, f32, f32) = (15.0, 9.0, 24.0);
-    let size = egui::vec2(pad.mul_add(2.0, text.size().x + icon + 6.0), h);
-    let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+    let full_width = pad.mul_add(2.0, text.size().x + icon + 6.0);
+    // In a narrow window the bar's left part gives way: then the icon only (the hover says what
+    // it does), and nothing drawn past the room the left part has.
+    let with_text = full_width <= ui.available_width();
+    let width = if with_text { full_width } else { pad.mul_add(2.0, icon) };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::click());
     let fill = if r.hovered() { ACCENT_HOVER } else { ACCENT };
-    let painter = ui.painter();
+    let painter = &ui.painter().with_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
     painter.rect_filled(rect, 6.0, fill);
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(icon.mul_add(0.5, rect.left() + pad), rect.center().y),
@@ -1766,8 +1821,10 @@ fn mode_button(ui: &mut egui::Ui, notes_on: bool, label: &str) -> egui::Response
     } else {
         notes_icon(painter, icon_rect, Color32::WHITE);
     }
-    let at = egui::pos2(icon_rect.right() + 6.0, rect.center().y - text.size().y / 2.0);
-    painter.galley(at, text, Color32::WHITE);
+    if with_text {
+        let at = egui::pos2(icon_rect.right() + 6.0, rect.center().y - text.size().y / 2.0);
+        painter.galley(at, text, Color32::WHITE);
+    }
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2279,6 +2336,9 @@ impl eframe::App for App {
             tap_tempo(ctx, m, &mut self.tap);
             ctx.request_repaint();
         }
+        if !self.fitted {
+            self.fit_window(ctx);
+        }
         self.keep_settings(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             // The editor goes while its window is still there.
@@ -2385,6 +2445,28 @@ fn to_u16(n: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_bigger_than_the_screen_is_made_to_fit() {
+        let v = egui::vec2;
+        let frame = v(16.0, 39.0);
+        // The default size on a 1024 × 768 screen: smaller, leaving room for the task bar.
+        let fitted = fit_on_screen(egui::Vec2::from(DEFAULT_SIZE), frame, v(1024.0, 768.0));
+        assert_eq!(
+            fitted,
+            v(1024.0 - 16.0 - SCREEN_MARGIN[0], 768.0 - 39.0 - SCREEN_MARGIN[1])
+        );
+        // It fits on a big screen: unchanged.
+        assert_eq!(
+            fit_on_screen(egui::Vec2::from(DEFAULT_SIZE), frame, v(1920.0, 1080.0)),
+            egui::Vec2::from(DEFAULT_SIZE)
+        );
+        // A tiny screen: never below the smallest size.
+        assert_eq!(
+            fit_on_screen(egui::Vec2::from(DEFAULT_SIZE), frame, v(600.0, 400.0)),
+            egui::Vec2::from(MIN_SIZE)
+        );
+    }
 
     #[test]
     fn a_window_that_cannot_open_is_explained() {

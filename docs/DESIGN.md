@@ -567,7 +567,10 @@ made on purpose; the startup report's plugin line says what happened.
   `settings.json.broken`. Saved one second after a change (a drag saves once) and on quit,
   written to a temporary file and renamed. `--metronome BPM` wins over the saved tempo; a plugin
   or `--midi` given on the command line wins over the remembered ones. A saved window size turns
-  off fitting the window to the editor at the first frame. `play` (no window) uses no settings
+  off fitting the window to the editor at the first frame. Once the screen's size is known, a
+  window bigger than the screen (the default 1200 × 760 on a small screen, a size saved on a
+  bigger one, or an editor's size) is made to fit, leaving room for the task bar, and moved to
+  the top, centred (`fit_on_screen`). `play` (no window) uses no settings
   except the instrument's sound.
 - **Fallbacks**: a remembered instrument that fails to load → the first instrument. A remembered
   keyboard that is not plugged in → the automatic choice (not waited for). A saved audio output

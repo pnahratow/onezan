@@ -61,11 +61,6 @@ To go through one by one: fix, or accept and say so (README or DESIGN.md).
   box, with the reason and "install the graphics driver" (on `polish-0.3`; on Linux the box needs
   zenity). Still open: whether to run anyway, with a renderer that does not need OpenGL (wgpu:
   DirectX 12 has a software fallback on Windows).
-- On a 1024×768 screen the window is bigger than the screen: the bar's right end ("Options") and
-  the keyboard's finger numbers end up off screen or under the task bar.
-- The startup report's hints say "click Audio" and "click Timing"; those are under Options now.
-- `onezan list` with nothing found prints the folders debug-formatted (`["C:\\Program Files..."]`
-  on Windows).
 - The mod wheel has no audible effect in Surge XT's default patch; unclear whether anything is
   wrong.
 - The octave button on a held note (set aside by the user earlier; to look at again).

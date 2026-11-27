@@ -46,9 +46,9 @@ Check again once fixed:
 | Check | Linux | Windows |
 |---|---|---|
 | Without OpenGL 2.0 (no graphics driver, a VM): onezan says why it cannot start, instead of exiting silently | | ✓ VM (message box, 2026-11-27) |
-| On a 1024×768 screen the window fits: the bar's right end and the keyboard's finger numbers are visible (now they run off the screen and under the task bar) | | |
-| The startup report's hints name what the window has ("click Audio", "click Timing" are under Options now) | | |
-| `onezan list` with nothing found: the folders are shown as paths (on Windows now `"C:\\Program Files\\..."`) | | |
+| On a 1024×768 screen the window fits: the bar's right end and the keyboard's finger numbers are visible (fixed: made to fit at start, and when sized to a plugin's editor) | | ✓ VM |
+| The startup report's hints name what the window has (now "Options, Audio output" and "Options, MIDI timing") | | ✓ VM |
+| `onezan list` with nothing found: the folders are shown as paths, one per line | | ✓ VM |
 
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
@@ -61,7 +61,7 @@ Check again once fixed:
 | Falling notes (playing a song along, waiting) | earlier | |
 | A MIDI keyboard unplugged and plugged back in while running | earlier | |
 | Falling notes: the file dialog, dropping a file on the window, Space in the notes view | | |
-| Falling notes: the mode button at narrow window widths (the bar's left part is cut off first) | | |
+| Falling notes: the mode button at narrow window widths (the bar's left part is cut off first; the button shrinks to its icon) | | ✓ VM, about 1000 points wide |
 | Exact vs. immediate MIDI timing, by ear (needs short audio blocks: JACK or a low-latency PipeWire setup) | | |
 
 ## The Windows VM
