@@ -1311,9 +1311,10 @@ impl App {
         }
     }
 
-    /// The keys pressed since the last frame (MIDI keyboard and mouse).
-    fn newly_pressed(&mut self) -> Vec<u8> {
-        let held = self.held_keys();
+    /// The key the mouse pressed since the last frame (the keyboard's come with their time:
+    /// [`onezan_engine::Keys::take_presses`]).
+    fn newly_pressed_by_mouse(&mut self) -> Vec<u8> {
+        let held: Vec<u8> = self.mouse_key.into_iter().collect();
         let pressed = held
             .iter()
             .copied()
@@ -1344,7 +1345,18 @@ impl App {
         self.notes.last_time = Some(time);
         let metronome = self.metronome().cloned();
         let bpm = self.bpm();
-        let pressed = self.newly_pressed();
+        // The keyboard's keys with when they arrived (to the millisecond), the mouse's now.
+        let now = Instant::now();
+        let mut pressed: Vec<(u8, Option<u8>, f64)> = self
+            .keys
+            .take_presses()
+            .into_iter()
+            .map(|p| {
+                let ago = now.saturating_duration_since(p.at).as_secs_f64() * bpm / 60.0;
+                (p.key, Some(p.velocity), ago)
+            })
+            .collect();
+        pressed.extend(self.newly_pressed_by_mouse().into_iter().map(|k| (k, None, 0.0)));
 
         // A run of another song (the scale or song changed) stops.
         let stale = self
@@ -1361,8 +1373,8 @@ impl App {
             // Play along: the metronome switched off stops the run.
             stopped = !run.wait && metronome.as_ref().is_some_and(|m| !m.is_on());
             run.advance(beat, dt * bpm / 60.0, bpm);
-            for key in pressed {
-                run.press(key, bpm, time);
+            for (key, velocity, ago) in pressed {
+                run.press(key, velocity, ago, bpm, time);
             }
             ctx.request_repaint();
         }
@@ -1431,14 +1443,13 @@ impl App {
                 20.0,
             ),
             Some(r) if r.finished() => {
-                let (hit, all) = r.score();
                 big(
                     format!(
-                        "{hit} of {all} notes {}  ·  best streak {}\nSpace: again",
-                        if r.wait { "played" } else { "on time" },
+                        "{}\nbest streak {}  ·  Space: again",
+                        r.evenness().summary(r.wait),
                         r.best_streak
                     ),
-                    24.0,
+                    20.0,
                 );
             }
             Some(r) if !r.wait && r.beat() < 0.0 => {

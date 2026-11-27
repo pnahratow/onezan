@@ -370,6 +370,77 @@ pub struct Run {
     pub best_streak: u32,
     /// Keys played right and wrong, with when (seconds, the window's clock), for a flash.
     pub flashes: Vec<(u8, bool, f64)>,
+    /// The notes played, with how far from their beat and how hard: for [`Run::evenness`].
+    pub hits: Vec<Hit>,
+}
+
+/// A note played: by which hand, how far from its beat (milliseconds, late positive; `None`
+/// when waiting, which has no beat to keep), and how hard (`None`: the mouse).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hit {
+    pub note: usize,
+    pub hand: Hand,
+    pub offset_ms: Option<f64>,
+    pub velocity: Option<u8>,
+}
+
+/// How even a run was: what a teacher listens for in a scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Evenness {
+    pub played: usize,
+    pub notes: usize,
+    /// How far the notes are from their beats, spread around their average: the timing's
+    /// standard deviation, in milliseconds (two notes or more played in time).
+    pub spread_ms: Option<f64>,
+    /// Their average offset: late positive, early negative, in milliseconds.
+    pub lean_ms: Option<f64>,
+    /// The loudness's standard deviation, in MIDI velocity (1 to 127).
+    pub loudness: Option<f64>,
+    /// How far apart the hands strike the notes they play together, on average, in
+    /// milliseconds.
+    pub hands_apart_ms: Option<f64>,
+}
+
+/// The mean and standard deviation of `values`, with two or more.
+fn mean_and_spread(values: &[f64]) -> Option<(f64, f64)> {
+    let n = f64::from(u32::try_from(values.len()).ok()?);
+    if n < 2.0 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / n;
+    let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+    Some((mean, var.sqrt()))
+}
+
+/// An offset leaning less than this either way is not mentioned.
+const LEAN_MS: f64 = 10.0;
+
+impl Evenness {
+    /// One line: "28 of 29 on time · timing ±14 ms · loudness ±5 · hands 9 ms apart · a little
+    /// late".
+    pub fn summary(&self, wait: bool) -> String {
+        let mut parts = vec![format!(
+            "{} of {} {}",
+            self.played,
+            self.notes,
+            if wait { "played" } else { "on time" }
+        )];
+        if let Some(s) = self.spread_ms {
+            parts.push(format!("timing ±{s:.0} ms"));
+        }
+        if let Some(l) = self.loudness {
+            parts.push(format!("loudness ±{l:.0}"));
+        }
+        if let Some(h) = self.hands_apart_ms {
+            parts.push(format!("hands {h:.0} ms apart"));
+        }
+        match self.lean_ms {
+            Some(l) if l >= LEAN_MS => parts.push(format!("a little late (+{l:.0} ms)")),
+            Some(l) if l <= -LEAN_MS => parts.push(format!("a little early ({l:.0} ms)")),
+            _ => {}
+        }
+        parts.join("  ·  ")
+    }
 }
 
 impl Run {
@@ -384,6 +455,7 @@ impl Run {
             streak: 0,
             best_streak: 0,
             flashes: Vec::new(),
+            hits: Vec::new(),
         }
     }
 
@@ -401,6 +473,38 @@ impl Run {
             self.status.iter().filter(|&&s| s == Status::Hit).count(),
             self.status.len(),
         )
+    }
+
+    /// How even the notes played so far were.
+    pub fn evenness(&self) -> Evenness {
+        let offsets: Vec<f64> = self.hits.iter().filter_map(|h| h.offset_ms).collect();
+        let velocities: Vec<f64> = self.hits.iter().filter_map(|h| h.velocity).map(f64::from).collect();
+        let timing = mean_and_spread(&offsets);
+        // The hands' offsets on the beats both play.
+        let mut by_beat: BTreeMap<i64, (Option<f64>, Option<f64>)> = BTreeMap::new();
+        for h in &self.hits {
+            let (Some(o), Some(n)) = (h.offset_ms, self.song.notes.get(h.note)) else {
+                continue;
+            };
+            #[expect(clippy::cast_possible_truncation, reason = "beats of a song, small")]
+            #[expect(clippy::as_conversions, reason = "no as-free f64 to i64 conversion")]
+            let slot = by_beat.entry((n.beat * 1000.0).round() as i64).or_default();
+            match h.hand {
+                Hand::Left => slot.0 = Some(o),
+                Hand::Right => slot.1 = Some(o),
+            }
+        }
+        let apart: Vec<f64> = by_beat.values().filter_map(|&(l, r)| Some((l? - r?).abs())).collect();
+        let (played, notes) = self.score();
+        Evenness {
+            played,
+            notes,
+            spread_ms: timing.map(|t| t.1),
+            lean_ms: timing.map(|t| t.0),
+            loudness: mean_and_spread(&velocities).map(|v| v.1),
+            hands_apart_ms: (!apart.is_empty())
+                .then(|| apart.iter().sum::<f64>() / f64::from(u32::try_from(apart.len()).unwrap_or(u32::MAX))),
+        }
     }
 
     /// Played through: a beat after the last note ends.
@@ -444,10 +548,11 @@ impl Run {
             .map(|(n, _)| n.beat)
     }
 
-    /// `key` was pressed now (`time`: the window's clock, for the flash). Returns whether it
-    /// played a note.
-    pub fn press(&mut self, key: u8, bpm: f64, time: f64) -> bool {
-        let beat = self.beat;
+    /// `key` was struck `ago` beats before now (MIDI arrives between frames), as hard as
+    /// `velocity` (`None`: the mouse); `time`: the window's clock, for the flash. Returns
+    /// whether it played a note.
+    pub fn press(&mut self, key: u8, velocity: Option<u8>, ago: f64, bpm: f64, time: f64) -> bool {
+        let beat = if self.wait { self.beat } else { self.beat - ago.max(0.0) };
         let found = if self.wait {
             // A note of the next chord (the notes starting together), from a beat before it.
             self.next_step().filter(|&step| beat >= step - 1.0).and_then(|step| {
@@ -472,6 +577,17 @@ impl Run {
             *s = Status::Hit;
             true
         });
+        if let Some(i) = found.filter(|_| hit)
+            && let Some(n) = self.song.notes.get(i)
+        {
+            let offset_ms = (!self.wait && bpm > 0.0).then(|| (beat - n.beat) * 60_000.0 / bpm);
+            self.hits.push(Hit {
+                note: i,
+                hand: n.hand,
+                offset_ms,
+                velocity,
+            });
+        }
         if hit {
             self.streak = self.streak.saturating_add(1);
             self.best_streak = self.best_streak.max(self.streak);
@@ -815,11 +931,11 @@ mod tests {
         // The metronome clicked beat 0 just now: the song starts four beats on.
         r.advance(Some(0.0), 0.0, bpm);
         r.advance(Some(4.1), 0.0, bpm);
-        assert!(r.press(60, bpm, 0.0), "right hand C4, a little late");
-        assert!(!r.press(62, bpm, 0.0), "D4 is not due yet");
+        assert!(r.press(60, None, 0.0, bpm, 0.0), "right hand C4, a little late");
+        assert!(!r.press(62, None, 0.0, bpm, 0.0), "D4 is not due yet");
         assert_eq!(r.streak, 0, "a wrong key ends the streak");
         r.advance(Some(4.9), 0.0, bpm);
-        assert!(r.press(62, bpm, 0.0), "D4, a little early");
+        assert!(r.press(62, None, 0.0, bpm, 0.0), "D4, a little early");
         r.advance(Some(6.0), 0.0, bpm);
         // The left hand's first two notes were never played.
         assert_eq!(r.status(0), Status::Missed);
@@ -831,13 +947,65 @@ mod tests {
         let mut r = Run::new(c_major(), true);
         r.advance(None, 10.0, 60.0);
         assert!(r.beat().abs() < 1e-9, "stops at the first notes");
-        assert!(r.press(60, 60.0, 0.0));
+        assert!(r.press(60, None, 0.0, 60.0, 0.0));
         r.advance(None, 10.0, 60.0);
         assert!(r.beat().abs() < 1e-9, "the left hand's C3 is still to play");
-        assert!(r.press(48, 60.0, 0.0));
+        assert!(r.press(48, None, 0.0, 60.0, 0.0));
         r.advance(None, 0.5, 60.0);
         assert!((r.beat() - 0.5).abs() < 1e-9, "on again");
-        assert!(r.press(62, 60.0, 0.0), "the next chord, played early");
+        assert!(r.press(62, None, 0.0, 60.0, 0.0), "the next chord, played early");
         assert_eq!(r.best_streak, 3);
+    }
+
+    #[test]
+    fn evenness_is_the_spread_of_the_timing_and_loudness() {
+        let mut r = Run::new(c_major(), false);
+        let bpm = 60.0;
+        // Play along at 60 BPM: a beat is a second. Each beat's two notes (left, right).
+        let plays: [(f64, f64, u8, u8); 4] = [
+            // (left offset, right offset in seconds, left velocity, right velocity)
+            (0.00, 0.02, 70, 80),
+            (0.01, 0.03, 72, 78),
+            (-0.01, 0.01, 68, 82),
+            (0.00, 0.02, 70, 80),
+        ];
+        let (left, right) = (r_notes(&r, Hand::Left), r_notes(&r, Hand::Right));
+        // The metronome's first click at 0: the song's beat 0 is the metronome's beat 4.
+        r.advance(Some(0.0), 0.0, bpm);
+        for (beat, (lo, ro, lv, rv)) in plays.iter().enumerate() {
+            let b = f64::from(u32::try_from(beat).unwrap());
+            // The frame comes after both presses; each press is `ago` beats before it.
+            let now = b + lo.max(*ro) + 0.005;
+            r.advance(Some(now + COUNT_IN), 0.0, bpm);
+            assert!(r.press(left[beat], Some(*lv), now - (b + lo), bpm, 0.0));
+            assert!(r.press(right[beat], Some(*rv), now - (b + ro), bpm, 0.0));
+        }
+        let e = r.evenness();
+        assert_eq!(e.played, 8);
+        // Offsets 0, 20, 10, 30, -10, 10, 0, 20 ms: mean 10, spread about 12.2.
+        assert!((e.lean_ms.unwrap() - 10.0).abs() < 0.5, "{e:?}");
+        assert!((e.spread_ms.unwrap() - 12.25).abs() < 0.5, "{e:?}");
+        // The right hand 20 ms after the left on every beat.
+        assert!((e.hands_apart_ms.unwrap() - 20.0).abs() < 0.5, "{e:?}");
+        assert!(e.loudness.unwrap() > 4.0 && e.loudness.unwrap() < 6.0, "{e:?}");
+        let text = e.summary(false);
+        assert!(text.starts_with("8 of 58 on time"), "{text}");
+        assert!(
+            text.contains("timing ±12 ms") && text.contains("hands 20 ms apart"),
+            "{text}"
+        );
+        assert!(text.contains("a little late (+10 ms)"), "{text}");
+    }
+
+    #[test]
+    fn evenness_needs_two_notes_and_says_nothing_it_cannot_know() {
+        let r = Run::new(c_major(), true);
+        let e = r.evenness();
+        assert_eq!((e.spread_ms, e.loudness, e.hands_apart_ms), (None, None, None));
+        assert_eq!(e.summary(true), "0 of 58 played");
+    }
+
+    fn r_notes(r: &Run, hand: Hand) -> Vec<u8> {
+        r.song.notes.iter().filter(|n| n.hand == hand).map(|n| n.key).collect()
     }
 }

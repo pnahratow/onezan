@@ -83,6 +83,19 @@ fingering of the choice, and that is what falls.
 | In contrary motion the two hands' first falling note is on one key: only one shows (drawn on top of each other). Fine, or mark it? | | |
 | The choices are remembered after a restart | | |
 
+### Scale exercises, step 2: how even it was (branch `polish-0.3`, 2026-11-27)
+
+After a run played along with the metronome, the end screen says how even it was, e.g. "28 of
+29 on time · timing ±14 ms · loudness ±5 · hands 9 ms apart · a little late (+12 ms)". Timing
+comes from when each key arrived over MIDI (to the millisecond), not from the frame.
+
+| Check | Linux | Windows |
+|---|---|---|
+| A run played as evenly as you can: are the numbers believable (timing ±10 to 30 ms, loudness ±5 to 10)? | | |
+| A run played unevenly on purpose (rushing, a loud thumb): the numbers get worse | | |
+| "a little early / late": matches how it felt against the click | | |
+| "Wait for me": no timing (it has no beat), loudness only | | |
+
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
 "earlier": STATUS.md listed these for real Windows only.

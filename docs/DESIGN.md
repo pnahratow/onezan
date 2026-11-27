@@ -45,7 +45,8 @@ crates/engine/          onezan-engine: MIDI in, audio out, timing
   instrument.rs         Instrument: a VST3 plugin or the built-in piano (rustysynth, a SoundFont);
                         Voice, its audio-thread half
   midi_in.rs            choose_midi_port, MidiWatch (opens, reconnects, releases held notes), Keys
-                        (held keys with velocity, pedal; for display)
+                        (held keys with velocity, pedal; for display; the keys struck, with
+                        their arrival time, for judging timing: take_presses)
   audio_out.rs          pick_output (JACK, else default), request_low_latency, AudioOut
   callback.rs           the audio callback: drain queues, place events, run the plugin
   timing.rs             exact vs. immediate placement of live MIDI in a block
@@ -83,8 +84,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
                         hands, any octaves; the preview the window shows; scale exercises
                         (Exercise: hands together an octave apart, one hand, contrary motion
                         from the key-note; 1 to 4 octaves, contrary at most 2; kept on 88 keys)
-  waterfall.rs          falling notes: Song (a scale, or a MIDI file via
-                        midly), Run (play along with the metronome, or wait), drawing
+  waterfall.rs          falling notes: Song (a scale exercise, or a MIDI file via
+                        midly), Run (play along with the metronome, or wait; each note played
+                        with its offset in ms and velocity: Run::evenness), drawing
   staff.rs              music notation with Bravura (assets/fonts/, SIL OFL 1.1, embedded
                         unchanged: a subset may not keep the name): the clef and key signature
                         in each row of the scales window

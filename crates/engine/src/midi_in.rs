@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often the port list is checked. A keyboard is usable at most this long after it is plugged
 /// in. (A replug faster than this, which gets the same ALSA port address back, goes unnoticed.)
@@ -91,7 +91,22 @@ pub struct Keys {
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// Told of every note: (key, velocity), velocity 0 for a release.
     listener: OnceLock<NoteListener>,
+    /// The keys struck since [`Keys::take_presses`] last took them, with when (at most
+    /// [`MAX_PRESSES`], the oldest dropped).
+    presses: Mutex<Vec<Press>>,
 }
+
+/// A key struck on the keyboard: when it arrived, for judging its timing to the millisecond
+/// (the window sees held keys only once a frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Press {
+    pub key: u8,
+    pub velocity: u8,
+    pub at: Instant,
+}
+
+/// Presses kept for [`Keys::take_presses`]; more are not needed between two frames.
+const MAX_PRESSES: usize = 256;
 
 type NoteListener = Box<dyn Fn(u8, u8) + Send + Sync>;
 
@@ -102,6 +117,7 @@ impl Default for Keys {
             sustain: AtomicBool::new(false),
             waker: OnceLock::new(),
             listener: OnceLock::new(),
+            presses: Mutex::new(Vec::new()),
         }
     }
 }
@@ -145,6 +161,11 @@ impl Keys {
         let _ = self.listener.set(Box::new(listener));
     }
 
+    /// The keys struck since the last call, oldest first.
+    pub fn take_presses(&self) -> Vec<Press> {
+        std::mem::take(&mut *self.presses.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
     fn tell(&self, key: u8, velocity: u8) {
         if let Some(l) = self.listener.get() {
             l(key, velocity);
@@ -161,6 +182,15 @@ impl Keys {
             MidiEvent::NoteOn { key, velocity, .. } => {
                 set(key, velocity.max(1));
                 self.tell(key, velocity.max(1));
+                let mut presses = self.presses.lock().unwrap_or_else(PoisonError::into_inner);
+                if presses.len() >= MAX_PRESSES {
+                    presses.remove(0);
+                }
+                presses.push(Press {
+                    key,
+                    velocity: velocity.max(1),
+                    at: Instant::now(),
+                });
             }
             MidiEvent::NoteOff { key, .. } => {
                 set(key, 0);
