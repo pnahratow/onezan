@@ -45,7 +45,7 @@ Check again once fixed:
 
 | Check | Linux | Windows |
 |---|---|---|
-| Without OpenGL 2.0 (no graphics driver, a VM): onezan says why it cannot start, instead of exiting silently | | |
+| Without OpenGL 2.0 (no graphics driver, a VM): onezan says why it cannot start, instead of exiting silently | | ✓ VM (message box, 2026-11-27) |
 | On a 1024×768 screen the window fits: the bar's right end and the keyboard's finger numbers are visible (now they run off the screen and under the task bar) | | |
 | The startup report's hints name what the window has ("click Audio", "click Timing" are under Options now) | | |
 | `onezan list` with nothing found: the folders are shown as paths (on Windows now `"C:\\Program Files\\..."`) | | |

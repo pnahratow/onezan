@@ -64,7 +64,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   session.rs            plugin + MIDI watcher + audio started together, with the report sections
   report.rs             the startup report as text
   gui.rs                the window (egui/eframe, OpenGL, our own event loop): editor, status bar,
-                        keyboard
+                        keyboard; a message box when the window cannot open (no OpenGL 2.0)
+  last_error.rs         the logger (env_logger), keeping the last error: eframe only logs why the
+                        window could not open
   embed.rs              the child window holding the plugin's editor (X11 on Linux, HWND on
                         Windows); fitting it in
   keyboard.rs           the on-screen keyboard widget: scale tint, velocity meter, fingering badges

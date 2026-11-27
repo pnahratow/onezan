@@ -18,6 +18,7 @@ mod gui;
 mod instrument_state;
 mod keyboard;
 mod known_plugins;
+mod last_error;
 mod piano;
 mod plugins;
 mod progress;
@@ -112,7 +113,7 @@ fn main() -> Result<()> {
     // SAFETY: first thing in main; no other thread exists yet.
     unsafe { onezan_engine::request_low_latency() };
     console::attach();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    last_error::init();
     let cli = Cli::parse();
     if !matches!(cli.cmd, None | Some(Cmd::Gui { .. })) {
         console::ensure();

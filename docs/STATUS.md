@@ -57,10 +57,10 @@ To go through one by one: fix, or accept and say so (README or DESIGN.md).
 **Not yet checked by hand**: the list is in QA.md.
 
 **Known problems**
-- Without OpenGL 2.0 (no graphics driver, a VM) onezan exits at once, without a word: the reason
-  ("egui_glow requires opengl 2.0+") only goes to stderr, which nobody sees after a double click.
-  Found on the Windows VM; Linux likely the same. At least a message box; maybe a renderer that
-  does not need OpenGL (wgpu: DirectX 12 has a software fallback on Windows).
+- Without OpenGL 2.0 (no graphics driver, a VM) onezan cannot start. It now says so in a message
+  box, with the reason and "install the graphics driver" (on `polish-0.3`; on Linux the box needs
+  zenity). Still open: whether to run anyway, with a renderer that does not need OpenGL (wgpu:
+  DirectX 12 has a software fallback on Windows).
 - On a 1024×768 screen the window is bigger than the screen: the bar's right end ("Options") and
   the keyboard's finger numbers end up off screen or under the task bar.
 - The startup report's hints say "click Audio" and "click Timing"; those are under Options now.

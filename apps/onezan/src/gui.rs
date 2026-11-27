@@ -14,7 +14,7 @@ use crate::progress::{Practice, Recorder};
 use crate::session::{Options, Remembered, Section, Session, port_name};
 use crate::settings::{MetronomeSettings, Settings, Store};
 use crate::waterfall::{self, Run, Song};
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use egui::{Color32, RichText};
 use onezan_engine::metronome::{MAX_BPM, MIN_BPM};
 use onezan_engine::{Click, Keys, Metronome, MidiChange, MidiTiming, Output, Verdict};
@@ -43,12 +43,39 @@ const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 /// The embedded editor, shared by the window and the loop that services it (UI thread only).
 type Shared = Rc<RefCell<Option<Embedded>>>;
 
-/// Opens the window and runs until it is closed.
+/// Opens the window and runs until it is closed. When no window can be opened, a message box
+/// says why (onezan is usually started with a double click, where nobody sees stderr).
 ///
 /// # Errors
 ///
 /// When no window can be opened.
-pub fn run(mut opts: Options) -> Result<()> {
+pub fn run(opts: Options) -> Result<()> {
+    let result = open(opts);
+    if let Err(e) = &result {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("onezan cannot start")
+            .set_description(cannot_start(&format!("{e:#}")))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+    result
+}
+
+/// The message for a window that cannot be opened because of `reason`.
+fn cannot_start(reason: &str) -> String {
+    let mut text = format!("onezan could not open its window.\n\n{reason}");
+    if reason.to_lowercase().contains("opengl") {
+        text.push_str(
+            "\n\nonezan draws its window with OpenGL 2.0 or newer, which comes with the graphics \
+             card's driver. Without a proper driver (often so in a virtual machine) there is none. \
+             Installing the driver for the graphics card should help.",
+        );
+    }
+    text
+}
+
+fn open(mut opts: Options) -> Result<()> {
     let (store, settings) = Store::open();
     opts.remembered = Remembered {
         plugin: settings.instrument.clone(),
@@ -76,10 +103,16 @@ pub fn run(mut opts: Options) -> Result<()> {
     };
     let embedded: Shared = Rc::default();
     let shared = Rc::clone(&embedded);
+    // Set once the window (and its OpenGL context) exists and the app is made.
+    let created = Rc::new(std::cell::Cell::new(false));
+    let made = Rc::clone(&created);
     let mut app = eframe::create_native(
         "onezan",
         native,
-        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, &opts, shared, store, settings)))),
+        Box::new(move |cc| {
+            made.set(true);
+            Ok(Box::new(App::new(&cc.egui_ctx, &opts, shared, store, settings)))
+        }),
         &event_loop,
     );
     // Our own loop rather than eframe's: while the plugin's editor is open it is serviced every
@@ -92,6 +125,11 @@ pub fn run(mut opts: Options) -> Result<()> {
         if let Some(e) = embedded.borrow().as_ref() {
             e.editor().idle();
         }
+    }
+    if !created.get() {
+        // eframe only logs why (see `last_error`).
+        let why = crate::last_error::last().unwrap_or_else(|| "no reason was given".to_owned());
+        bail!("{}", why.trim_start_matches("Exiting because of error: "));
     }
     Ok(())
 }
@@ -2347,6 +2385,16 @@ fn to_u16(n: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_that_cannot_open_is_explained() {
+        let gl = cannot_start("egui_glow: OpenGL: egui_glow requires opengl 2.0+.");
+        assert!(gl.contains("requires opengl 2.0+"), "{gl}");
+        assert!(gl.contains("graphics card's driver"), "{gl}");
+        // Other reasons are given as they are, without the driver advice.
+        let other = cannot_start("cannot open the window: no display");
+        assert!(other.contains("no display") && !other.contains("driver"), "{other}");
+    }
 
     #[test]
     fn tap_tempo_averages_the_last_taps_and_starts_over_after_a_pause() {
