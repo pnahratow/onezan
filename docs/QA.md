@@ -112,6 +112,22 @@ fastest clean tempo per scale for the exercise chosen in Learn Song.
 | ±30 ms: too strict or too lenient? (a guess: no teaching source gives a number) | | |
 | Climbing feels right: one marking per clean run, not too slow, not too fast | | |
 
+### Timing calibration and starting with the I chord (branch `polish-0.3`, 2026-11-27)
+
+The click's beat now follows when the audio system says a block is heard (WASAPI and ALSA say;
+JACK partly), not one block on. Options → Timing calibration: the metronome clicks at 80, a key
+on each click, 16 times after the first two; the median offset is saved and taken off every
+note when judging. A scale in Learn Song also starts by playing its I chord (any inversion).
+
+| Check | Linux | Windows |
+|---|---|---|
+| Calibrate: the count goes up with each click played; the result reads believably (10 to 60 ms after) | | |
+| Calibrate unevenly on purpose: "too uneven to measure", nothing saved | | |
+| After calibrating, a scale played well reads "on time" with no early/late lean | | |
+| With Bluetooth headphones: the offset is much larger (100 ms or more), and judging still works after calibrating | | |
+| The I chord (e.g. C E G, or E G C) starts the run with the count-in; it is not judged; during a run it does nothing | | |
+| The Options window: "The audio system reports N ms" under JACK, ALSA and WASAPI | | ✓ VM (WASAPI 10 ms) |
+
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
 "earlier": STATUS.md listed these for real Windows only.

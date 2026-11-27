@@ -27,6 +27,9 @@ impl Render for Voice {
 pub struct Report {
     /// Frames per callback, once settled.
     pub block: Arc<AtomicU32>,
+    /// The audio system's predicted delay until a block is heard, in microseconds, once
+    /// settled; 0 when it does not say.
+    pub delay_us: Arc<AtomicU32>,
 }
 
 /// State owned by the audio callback. Everything is allocated up front.
@@ -82,7 +85,9 @@ impl<V: Render> Callback<V> {
         }
     }
 
-    pub fn run(&mut self, out: &mut [f32]) {
+    /// Fills `out`. `delay`: how long until its first frame is heard, as the audio system
+    /// predicts it (`None`: it does not say; then about one block, the one playing now).
+    pub fn run(&mut self, out: &mut [f32], delay: Option<Duration>) {
         let now = Instant::now();
         let prev = self.prev.replace(now);
         let ch = self.channels;
@@ -94,6 +99,8 @@ impl<V: Render> Callback<V> {
             self.report
                 .block
                 .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Relaxed);
+            let us = delay.map_or(0, |d| u32::try_from(d.as_micros()).unwrap_or(u32::MAX));
+            self.report.delay_us.store(us, Ordering::Relaxed);
         }
 
         self.events.clear();
@@ -125,8 +132,10 @@ impl<V: Render> Callback<V> {
                     .map(|&(at, ev)| (at.saturating_sub(start), ev)),
             );
             self.voice.process(&self.part_events, l, r);
-            // Heard about one block from now: the block before it is playing.
-            let heard = now.checked_add(heard_after(start.saturating_add(frames), self.rate));
+            // When this part's first frame is heard: the system's delay, else about one block
+            // (the block before it is playing).
+            let ahead = delay.unwrap_or_else(|| heard_after(frames, self.rate));
+            let heard = now.checked_add(ahead.saturating_add(heard_after(start, self.rate)));
             self.clicker.render_heard_at(&self.metronome, l, r, heard);
             start = end;
             for ((frame, &lv), &rv) in chunk.chunks_mut(ch).zip(l.iter()).zip(r.iter()) {
@@ -201,7 +210,10 @@ mod tests {
             channels,
             48_000,
             Arc::new(SharedTiming::new(timing)),
-            Report { block: block.clone() },
+            Report {
+                block: block.clone(),
+                delay_us: Arc::default(),
+            },
             Arc::clone(&metronome),
         );
         Setup {
@@ -232,7 +244,7 @@ mod tests {
     /// Runs one callback of `frames` frames.
     fn run(s: &mut Setup, frames: usize, channels: usize) -> Vec<f32> {
         let mut out = vec![9.0; frames * channels];
-        s.cb.run(&mut out);
+        s.cb.run(&mut out, None);
         out
     }
 

@@ -234,6 +234,11 @@ impl Session {
         let _ = self.screen.push(TimedEvent::now(event));
     }
 
+    /// How long until what the app plays is heard, as the audio system predicts it.
+    pub fn output_delay(&self) -> Option<std::time::Duration> {
+        self.audio.as_ref().and_then(AudioOut::output_delay)
+    }
+
     /// The MIDI timing setting.
     pub fn timing(&self) -> Option<MidiTiming> {
         self.audio.as_ref().map(AudioOut::timing)

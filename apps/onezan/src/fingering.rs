@@ -155,6 +155,25 @@ impl Scale {
         (right.saturating_sub(24), right)
     }
 
+    /// Its I chord's name: "C major", "F# minor".
+    pub fn tonic_chord_name(self) -> String {
+        let quality = if self.kind == Kind::Major { "major" } else { "minor" };
+        format!("{} {quality}", self.root_name())
+    }
+
+    /// Whether `keys` (MIDI keys) are the scale's I chord: its root, third and fifth, in any
+    /// octave and inversion, each at least once and nothing else.
+    pub fn is_tonic_chord(self, keys: &[u8]) -> bool {
+        let third = if self.kind == Kind::Major { 4 } else { 3 };
+        let chord = [0, third, 7].map(|step: u8| self.root.wrapping_add(step) % 12);
+        let mut played: Vec<u8> = keys.iter().map(|k| k % 12).collect();
+        played.sort_unstable();
+        played.dedup();
+        let mut wanted = chord.to_vec();
+        wanted.sort_unstable();
+        played == wanted
+    }
+
     /// Whether the pitch class of `key` is in the scale (going up).
     pub fn contains(self, key: u8) -> bool {
         let step = (key % 12).wrapping_add(12).wrapping_sub(self.root % 12) % 12;
@@ -1007,6 +1026,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_tonic_chord_in_any_inversion_and_octave() {
+        let c = scale(M, 0);
+        assert!(c.is_tonic_chord(&[60, 64, 67]));
+        assert!(c.is_tonic_chord(&[52, 55, 60]), "first inversion");
+        assert!(c.is_tonic_chord(&[36, 48, 64, 67, 72]), "spread, doubled");
+        assert!(!c.is_tonic_chord(&[60, 63, 67]), "C minor");
+        assert!(!c.is_tonic_chord(&[60, 64]), "no fifth");
+        assert!(!c.is_tonic_chord(&[60, 64, 67, 71]), "Cmaj7");
+        let a = scale(Kind::HarmonicMinor, 9);
+        assert!(a.is_tonic_chord(&[57, 60, 64]));
+        assert_eq!(a.tonic_chord_name(), "A minor");
+        assert_eq!(scale(M, 6).tonic_chord_name(), "F# major");
     }
 
     #[test]

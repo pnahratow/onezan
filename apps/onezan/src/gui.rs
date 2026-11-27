@@ -267,6 +267,13 @@ struct App {
     exercise: Exercise,
     /// The fastest clean tempo per scale in that exercise, read with `practice`.
     clean: HashMap<String, u32>,
+    /// How late the player's notes arrive after the click heard (ms), from the timing
+    /// calibration: taken off every note when judging.
+    timing_offset_ms: f64,
+    /// The timing calibration while it goes, with the metronome's tempo and on/off before it.
+    calibrating: Option<(crate::calibration::Calibration, u32, bool)>,
+    /// What the last calibration said, when it did not give an offset.
+    calibration_note: Option<String>,
 }
 
 /// The falling notes, shown in place of the instrument's window.
@@ -275,6 +282,8 @@ struct App {
 struct Notes {
     /// Shown (the bar's Notes button).
     on: bool,
+    /// The keyboard held the scale's I chord at the last frame (playing it starts a run).
+    tonic_held: bool,
     /// The notes wait at the keys until played; otherwise they keep the metronome's time.
     wait: bool,
     /// The song opened, and its file; `None`: the scale shown falls.
@@ -418,6 +427,9 @@ impl App {
                 octaves: settings.exercise_octaves.unwrap_or_else(|| Exercise::default().octaves),
             },
             clean: HashMap::new(),
+            timing_offset_ms: settings.timing_offset_ms.unwrap_or(0.0),
+            calibrating: None,
+            calibration_note: None,
             saved: settings,
             changed_at: None,
             notes,
@@ -485,6 +497,7 @@ impl App {
             tips_done: self.tips_done.clone(),
             exercise_hands: (self.exercise.hands != Hands::default()).then(|| self.exercise.hands.name().to_owned()),
             exercise_octaves: (self.exercise.octaves != Exercise::default().octaves).then_some(self.exercise.octaves),
+            timing_offset_ms: (self.timing_offset_ms != 0.0).then_some(self.timing_offset_ms),
         }
     }
 
@@ -649,6 +662,12 @@ impl App {
         let (session, audio_note, lists) = (self.session.as_ref(), self.audio_note.as_deref(), &mut self.menus);
         let theme = &mut self.theme;
         let mut pick = None;
+        let calibration_state = CalibrationState {
+            measured: self.calibrating.as_ref().map(|(c, ..)| c.offsets_ms.len()),
+            offset_ms: self.timing_offset_ms,
+            note: self.calibration_note.as_deref(),
+        };
+        let calibration_action = &mut None;
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("options"), builder, |ui, _| {
             let now = ui.ctx().input(|i| i.viewport().inner_rect);
             if now != *size {
@@ -685,6 +704,9 @@ impl App {
                 ui.add_space(4.0);
                 timing_menu(ui, s.timing(), &mut pick);
                 ui.add_space(12.0);
+                ui.heading("Timing calibration");
+                *calibration_action = calibration_section(ui, &calibration_state, s.output_delay());
+                ui.add_space(12.0);
                 ui.heading("Appearance");
                 ui.horizontal(|ui| {
                     for (choice, label) in [
@@ -701,6 +723,15 @@ impl App {
         });
         if let Some(p) = pick {
             self.apply(p);
+        }
+        match calibration_action.take() {
+            Some(CalibrationAction::Start) => self.start_calibration(),
+            Some(CalibrationAction::Stop) => self.end_calibration(),
+            Some(CalibrationAction::Reset) => {
+                self.timing_offset_ms = 0.0;
+                self.calibration_note = None;
+            }
+            None => {}
         }
         if close {
             self.open.options = false;
@@ -1174,6 +1205,16 @@ impl App {
         self.live_run().is_some()
     }
 
+    /// Whether the keyboard holds the I chord of the scale that falls (none with a song open).
+    fn tonic_chord_held(&self) -> bool {
+        let Preview::Scale(s) = self.preview else { return false };
+        if self.notes.song.is_some() {
+            return false;
+        }
+        let held: Vec<u8> = (0..=127u8).filter(|&k| self.keys.held(k)).collect();
+        s.is_tonic_chord(&held)
+    }
+
     /// Whether the metronome keeps the time unheard: a song open, played along with, and its
     /// click switched off (the metronome button). Everywhere else it clicks as ever.
     fn metronome_silent(&self) -> bool {
@@ -1352,12 +1393,17 @@ impl App {
         let bpm = self.bpm();
         // The keyboard's keys with when they arrived (to the millisecond), the mouse's now.
         let now = Instant::now();
-        let mut pressed: Vec<(u8, Option<u8>, f64)> = self
-            .keys
-            .take_presses()
+        let struck = self.keys.take_presses();
+        if self.calibrating.is_some() {
+            self.calibrate(&struck, now, ctx);
+            return;
+        }
+        // How long ago each note was played, less the calibrated delay of its arrival.
+        let offset = self.timing_offset_ms / 1000.0;
+        let mut pressed: Vec<(u8, Option<u8>, f64)> = struck
             .into_iter()
             .map(|p| {
-                let ago = now.saturating_duration_since(p.at).as_secs_f64() * bpm / 60.0;
+                let ago = (now.saturating_duration_since(p.at).as_secs_f64() + offset) * bpm / 60.0;
                 (p.key, Some(p.velocity), ago)
             })
             .collect();
@@ -1371,6 +1417,15 @@ impl App {
             .is_some_and(|r| Some(r.song.name.as_str()) != self.falling_name().as_deref());
         if stale {
             self.stop_run();
+        }
+        // The scale's I chord, newly played, starts a run as Space does (not during one).
+        let tonic = self.tonic_chord_held();
+        let by_chord = tonic && !self.notes.tonic_held && self.notes.on && !self.running();
+        self.notes.tonic_held = tonic;
+        if by_chord {
+            self.toggle_run();
+            // The chord itself is not judged.
+            pressed.clear();
         }
         let mut stopped = false;
         if let Some(run) = self.notes.run.as_mut().filter(|r| !r.finished()) {
@@ -1395,6 +1450,61 @@ impl App {
         if let Some(m) = self.metronome() {
             m.set_silent(self.metronome_silent());
         }
+    }
+
+    /// Starts the timing calibration: the metronome clicks at [`crate::calibration::BPM`] from
+    /// its first beat, the player plays a key on each click.
+    fn start_calibration(&mut self) {
+        self.stop_run();
+        let Some(m) = self.metronome().cloned() else { return };
+        self.calibrating = Some((crate::calibration::Calibration::default(), m.bpm(), m.is_on()));
+        self.calibration_note = None;
+        m.set_on(false);
+        m.set_bpm(crate::calibration::BPM);
+        m.set_silent(false);
+        m.set_on(true);
+    }
+
+    /// Ends the calibration (done or not): the metronome as it was before.
+    fn end_calibration(&mut self) {
+        if let Some((_, bpm, was_on)) = self.calibrating.take()
+            && let Some(m) = self.metronome()
+        {
+            m.set_bpm(bpm);
+            m.set_on(was_on);
+        }
+    }
+
+    /// Measures the notes against the clicks heard; when there are enough, keeps the offset.
+    fn calibrate(&mut self, presses: &[onezan_engine::Press], now: Instant, ctx: &egui::Context) {
+        ctx.request_repaint();
+        let Some(m) = self.metronome().cloned() else {
+            self.end_calibration();
+            return;
+        };
+        let bpm = f64::from(m.bpm());
+        let Some((cal, ..)) = self.calibrating.as_mut() else {
+            return;
+        };
+        if let Some(beat) = m.beat_now() {
+            for p in presses {
+                let ago = now.saturating_duration_since(p.at).as_secs_f64() * bpm / 60.0;
+                cal.note(beat - ago, bpm);
+            }
+        }
+        if !cal.done() {
+            return;
+        }
+        match cal.outcome() {
+            Some(crate::calibration::Outcome::Offset(ms)) => self.timing_offset_ms = ms,
+            Some(crate::calibration::Outcome::Uneven(spread)) => {
+                self.calibration_note = Some(format!(
+                    "The notes were too uneven to measure (±{spread:.0} ms): try again, as steadily as you can"
+                ));
+            }
+            None => {}
+        }
+        self.end_calibration();
     }
 
     /// Once a run is played through: a scale exercise played along with the metronome is
@@ -1476,14 +1586,19 @@ impl App {
                 Color32::from_gray(230),
             );
         };
+        // A scale starts with Space or by playing its I chord.
+        let start = match (&self.notes.song, self.preview) {
+            (None, Preview::Scale(s)) => format!("Space or a {} chord", s.tonic_chord_name()),
+            _ => "Space".to_owned(),
+        };
         match run {
             None => big(
                 if self.notes.wait {
-                    "Space: start. The notes wait at the keys until you play them.".to_owned()
+                    format!("{start}: start. The notes wait at the keys until you play them.")
                 } else if self.notes.silent && self.notes.song.is_some() {
-                    "Space: start. The metronome keeps the time, unheard.".to_owned()
+                    format!("{start}: start. The metronome keeps the time, unheard.")
                 } else {
-                    "Space: start, with the metronome".to_owned()
+                    format!("{start}: start, with the metronome")
                 },
                 20.0,
             ),
@@ -1491,7 +1606,7 @@ impl App {
                 let verdict = r.verdict.as_deref().filter(|v| !v.is_empty());
                 big(
                     format!(
-                        "{}\n{}best streak {}  ·  Space: again",
+                        "{}\n{}best streak {}  ·  {start}: again",
                         r.evenness().summary(r.wait),
                         verdict.map_or_else(String::new, |v| format!("{v}\n")),
                         r.best_streak
@@ -1933,6 +2048,75 @@ impl TapTempo {
 /// The bar's switch between the instrument and the falling notes: filled in the accent colour,
 /// with an icon for where it leads (falling notes, or an instrument's sliders), so it stands
 /// out from the other buttons.
+/// The timing calibration as the Options window shows it.
+struct CalibrationState<'a> {
+    /// While it goes: the clicks measured so far.
+    measured: Option<usize>,
+    offset_ms: f64,
+    note: Option<&'a str>,
+}
+
+enum CalibrationAction {
+    Start,
+    Stop,
+    Reset,
+}
+
+/// The Options window's timing calibration: what is set, and the button to measure it.
+fn calibration_section(
+    ui: &mut egui::Ui,
+    state: &CalibrationState<'_>,
+    delay: Option<Duration>,
+) -> Option<CalibrationAction> {
+    use crate::calibration::{BPM, CLICKS, describe};
+    let mut action = None;
+    if let Some(n) = state.measured {
+        ui.label(RichText::new(format!("Play any key on each click: {n} of {CLICKS}")).strong());
+        if ui.button("Stop").clicked() {
+            action = Some(CalibrationAction::Stop);
+        }
+        return action;
+    }
+    ui.label(if state.offset_ms == 0.0 {
+        "Not calibrated: notes are judged as they arrive".to_owned()
+    } else {
+        describe(state.offset_ms)
+    });
+    if let Some(note) = state.note {
+        ui.label(RichText::new(note).color(Color32::from_rgb(239, 68, 68)));
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .button("Calibrate")
+            .on_hover_text(format!(
+                "The metronome clicks at {BPM}: play any key on each click, {CLICKS} times after the \
+                 first two. onezan measures how late your notes arrive after the click you hear (sound \
+                 out, MIDI in, Bluetooth headphones, your own habit) and takes it off when judging \
+                 timing. Again after changing the audio output or headphones."
+            ))
+            .clicked()
+        {
+            action = Some(CalibrationAction::Start);
+        }
+        if state.offset_ms != 0.0 && ui.button("Reset").clicked() {
+            action = Some(CalibrationAction::Reset);
+        }
+    });
+    ui.label(
+        RichText::new(delay.map_or_else(
+            || "The audio system does not say how long until a click is heard: calibrate for that".to_owned(),
+            |d| {
+                format!(
+                    "The audio system reports {} ms until a click is heard: already allowed for",
+                    d.as_millis()
+                )
+            },
+        ))
+        .weak(),
+    );
+    action
+}
+
 /// The scale exercise's choices: which hands (and how), and how many octaves.
 fn exercise_controls(ui: &mut egui::Ui, exercise: &mut Exercise) {
     egui::ComboBox::from_id_salt("exercise hands")

@@ -10,6 +10,7 @@ use onezan_vst3_host::MidiEvent;
 use std::io::BufRead;
 use std::time::Duration;
 
+mod calibration;
 mod chords;
 mod console;
 mod embed;

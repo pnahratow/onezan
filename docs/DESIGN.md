@@ -48,7 +48,9 @@ crates/engine/          onezan-engine: MIDI in, audio out, timing
                         (held keys with velocity, pedal; for display; the keys struck, with
                         their arrival time, for judging timing: take_presses)
   audio_out.rs          pick_output (JACK, else default), request_low_latency, AudioOut
-  callback.rs           the audio callback: drain queues, place events, run the plugin
+  callback.rs           the audio callback: drain queues, place events, run the plugin; when a
+                        block is heard (the audio system's predicted delay, else one block),
+                        for the metronome's beat
   timing.rs             exact vs. immediate placement of live MIDI in a block
   metronome.rs          Metronome (settings, atomics), Clicker (clicks in the callback)
   report.rs             Considered / Verdict: what was considered and why (startup report)
@@ -80,6 +82,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   progress.rs           practice history: every note with its scale, in SQLite; practice time;
                         the scale exercises played along (runs: tempo, evenness, clean), the
                         fastest clean tempo per scale and exercise
+  calibration.rs        timing calibration: a key on each of 16 clicks at 80 BPM; the median
+                        offset (a robust spread decides if it is trusted), saved and taken off
+                        every note when judging
   ladder.rs             the tempo ladder: clean (every note on time, timing spread within
                         ±30 ms) goes up a metronome marking, a near miss stays, many misses
                         go down

@@ -124,6 +124,8 @@ pub struct AudioOut {
     pub considered: Vec<Considered>,
     /// Frames in the latest audio callback, 0 until [`SETTLE_CALLBACKS`] have run.
     block: Arc<AtomicU32>,
+    /// The audio system's predicted delay until a block is heard (µs; 0: it does not say).
+    delay_us: Arc<AtomicU32>,
     /// Whether it is JACK (its one output is listed as [`JACK_DEVICE`]).
     jack: bool,
     /// The MIDI timing setting, shared with the callback.
@@ -292,7 +294,11 @@ impl AudioOut {
 
         let voice = instrument.start(sample_rate.0, MAX_FRAMES)?;
         let block = Arc::new(AtomicU32::new(0));
-        let report = Report { block: block.clone() };
+        let delay_us = Arc::new(AtomicU32::new(0));
+        let report = Report {
+            block: block.clone(),
+            delay_us: delay_us.clone(),
+        };
         let timing = Arc::new(SharedTiming::new(timing));
         let mut cb = Callback::new(
             voice,
@@ -306,7 +312,10 @@ impl AudioOut {
         let stream = device
             .build_output_stream(
                 &config,
-                move |data: &mut [f32], _| cb.run(data),
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    let t = info.timestamp();
+                    cb.run(data, t.playback.duration_since(&t.callback));
+                },
                 |e| match e {
                     // JACK reports the graph changing its block size (PipeWire enforcing its
                     // minimum, another app asking for less) as an error. It is not one.
@@ -329,6 +338,7 @@ impl AudioOut {
             sample_rate: sample_rate.0,
             buffer_frames,
             block,
+            delay_us,
             jack: is_jack(host_id),
             timing,
             stream,
@@ -357,6 +367,16 @@ impl AudioOut {
     /// Changes the MIDI timing setting; the next audio block uses it.
     pub fn set_timing(&self, t: MidiTiming) {
         self.timing.set(t);
+    }
+
+    /// How long until what the app plays is heard, as the audio system predicts it (`None`: it
+    /// does not say, or has not settled yet). The metronome's beat already allows for it.
+    #[must_use]
+    pub fn output_delay(&self) -> Option<Duration> {
+        match self.delay_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(Duration::from_micros(u64::from(us))),
+        }
     }
 
     /// The MIDI timing in use (exact or immediate), once the block size has settled.
