@@ -41,7 +41,7 @@ What exists is marked ✓; the rest is open, to do when that part changes next.
 | Class ids print the same on every platform | ✓ `util.rs` |
 | Editor run loop: handlers and timers run, stop when unregistered | ✓ `run_loop.rs` |
 | Plugin state from an older onezan loads | ✓ `stream.rs` (fixture in `crates/vst3-host/fixtures/`) |
-| Scanning: a folder with a broken or non-VST3 bundle gives the others, never an error | open: a temp folder with a fake bundle |
+| Scanning: a folder with a broken or non-VST3 bundle gives the others, never an error | open: a temp folder with a fake bundle (done by hand, see "Plugins that crash onezan" below) |
 
 ### engine
 
@@ -66,6 +66,8 @@ What exists is marked ✓; the rest is open, to do when that part changes next.
 | Falling notes: a scale or a MIDI file becomes a song (beats, hands); note names spelled by scale degree or key signature; playing along counts notes on time and misses late ones; waiting stops at each chord | ✓ `waterfall.rs` |
 | Settings: missing and unknown keys are fine, a broken file is moved aside, unchanged settings are not written; the 0.1 file loads | ✓ `settings.rs`, fixture in `apps/onezan/fixtures/` |
 | Practice history: pauses do not count, notes carry their scale, a damaged file is moved aside; the 0.1 database loads | ✓ `progress.rs`, fixture in `apps/onezan/fixtures/` |
+| **Plugins that crash onezan**: unchanged bundles come from the cache, updated ones are scanned again; one that failed to load is tried again; the note names the bundle while it is scanned; one that crashed the scan is skipped until updated; one that crashed while loading is listed as such until forgiven; a damaged or older file means scanning again (keeping crashes) | ✓ `known_plugins.rs`, over fake bundles |
+| Instrument choice with crashes: the automatic pick passes over a plugin that crashed; the one used last time is skipped if it crashed; asked for by name, it is tried again | ✓ `plugins.rs` |
 | Instrument sound: a damaged, refused or crashed state is moved aside and the default used | open: the file handling in `instrument_state.rs` is testable without a plugin if it takes the save/restore as a function |
 | Startup report: the item used is first and says why; each alternative says why not | ✓ partly (`audio_out.rs`); open: one test per section on the facts, not the wording |
 

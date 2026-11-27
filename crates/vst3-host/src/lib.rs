@@ -24,7 +24,7 @@ mod util;
 pub use editor::Editor;
 pub use midi::MidiEvent;
 pub use plugin::{Plugin, Processor, State};
-pub use scan::{PluginInfo, default_search_paths, find_bundles, scan};
+pub use scan::{PluginInfo, default_search_paths, find_bundles, fingerprint, scan, scan_bundle};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

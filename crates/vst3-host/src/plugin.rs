@@ -37,7 +37,7 @@ pub struct Plugin {
     controller_separate: bool,
     connections: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
     host: ComWrapper<HostApp>,
-    _module: Arc<Module>,
+    module: Arc<Module>,
     active: bool,
     /// Held by the live [`Processor`]; the plugin is not deactivated while it is.
     processor_token: Arc<()>,
@@ -109,7 +109,7 @@ impl Plugin {
             controller_separate: false,
             connections: None,
             host,
-            _module: module.clone(),
+            module: module.clone(),
             active: false,
             processor_token: Arc::new(()),
             editor_token: Arc::new(()),
@@ -168,6 +168,12 @@ impl Plugin {
     #[must_use]
     pub fn class_id(&self) -> &str {
         &self.class_id
+    }
+
+    /// The bundle this plugin was loaded from (its canonical path).
+    #[must_use]
+    pub fn bundle(&self) -> &Path {
+        &self.module.path
     }
 
     /// The plugin's current state: its sound and settings, as the plugin itself writes them.

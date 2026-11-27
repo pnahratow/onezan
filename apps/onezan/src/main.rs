@@ -17,6 +17,7 @@ mod fingering;
 mod gui;
 mod instrument_state;
 mod keyboard;
+mod known_plugins;
 mod piano;
 mod plugins;
 mod progress;
@@ -26,6 +27,7 @@ mod settings;
 mod staff;
 mod waterfall;
 
+use known_plugins::Activity;
 use plugins::{Installed, choose, installed};
 use report::{midi_change, print_report, print_section};
 use session::{Options, Remembered, Session};
@@ -173,8 +175,8 @@ fn main() -> Result<()> {
 }
 
 fn list(all: bool) {
-    let plugins = installed();
-    let shown: Vec<_> = plugins.iter().filter(|p| all || p.is_instrument()).collect();
+    let scan = installed();
+    let shown: Vec<_> = scan.plugins.iter().filter(|p| all || p.is_instrument()).collect();
     if shown.is_empty() {
         println!(
             "no VST3 {}found in {:?}",
@@ -199,6 +201,17 @@ fn list(all: bool) {
             p.sub_categories,
             p.class_id,
             p.bundle.display()
+        );
+    }
+    for (bundle, during) in &scan.crashed {
+        let (what, retry) = match during {
+            Activity::Scanning => ("skipped", "give its path to `onezan play` to try again"),
+            _ => ("not loaded by itself", "ask for it by name to try again"),
+        };
+        println!(
+            "{what}: {} crashed onezan last time, {} ({retry})",
+            bundle.display(),
+            during.describe()
         );
     }
 }
@@ -248,7 +261,7 @@ fn play_scale(mut tx: onezan_engine::Producer<TimedEvent>) {
 }
 
 fn render(plugin_arg: Option<&str>, sample_rate: u32) -> Result<()> {
-    let loaded = choose(&mut Installed, plugin_arg, None)?;
+    let loaded = choose(&mut Installed::default(), plugin_arg, None)?;
     let mut instrument = loaded.instrument;
     print_section("plugin", &loaded.considered, "", "");
     // A quarter second per note, sounding for 90% of it; two silent notes' worth at the end.

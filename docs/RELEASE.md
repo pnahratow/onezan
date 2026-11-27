@@ -50,6 +50,7 @@ setup where the line says so: move `~/.config/onezan` and `~/.local/share/onezan
 | Instruments window: list, favorites, Rescan, switching between two plugins and the piano | | |
 | The plugin's editor: embedded, fits, follows window resizes, mouse works, tooltips | | |
 | A changed plugin sound comes back after a restart | | |
+| A plugin that crashes (a test bundle that aborts, see DESIGN.md "Plugins that crash onezan"): the next start skips it; the instruments window shows it greyed out or under "Skipped"; clicking it or "Try again" tries it again | | |
 | Built-in piano page: drawing, volume slider (heard, remembered) | | |
 
 ### Options

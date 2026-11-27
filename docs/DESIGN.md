@@ -37,7 +37,8 @@ crates/vst3-host/       onezan-vst3-host: the VST3 host (no devices, no GUI)
   editor.rs             Editor: the plugin's IPlugView in a parent window of the app; IPlugFrame
   run_loop.rs           Linux: IRunLoop, the editor's timers and descriptors serviced on the UI thread
   midi.rs               MidiEvent::parse (has a unit test)
-  scan.rs               default_search_paths ($VST3_PATH, ~/.vst3, /usr/lib/vst3, ...), find_bundles, scan
+  scan.rs               default_search_paths ($VST3_PATH, ~/.vst3, /usr/lib/vst3, ...), find_bundles,
+                        scan / scan_bundle, fingerprint (a bundle's binary: size and mtime)
   util.rs               conversions (platform enum types, strings, TUIDs)
 crates/engine/          onezan-engine: MIDI in, audio out, timing
   lib.rs                module map, re-exports, MIDI queues (rtrb)
@@ -57,6 +58,8 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   main.rs               command line, play, render
   plugins.rs            installed plugins; resolve/load: which instrument an argument picks, and
                         why; the built-in piano when no plugin loads
+  known_plugins.rs      plugins.json (data folder): the scan cache, and the plugins that crashed
+                        onezan (a note written around each scan, load and editor opening)
   piano.rs              the built-in piano, embedded by build.rs (when assets/piano/ has it)
   session.rs            plugin + MIDI watcher + audio started together, with the report sections
   report.rs             the startup report as text
@@ -238,7 +241,26 @@ switches (`App::switch_instrument`): the current sound is saved, the editor remo
 same code as at startup (`start_session`), with the keyboard in use, the metronome's settings and
 whether it was running, and the scale. The new instrument's own saved sound is restored, and it
 is remembered for the next start. If it fails, the previous instrument is started again and the
-window says why in red. The window keeps its size (the new editor is fitted into it).
+window says why in red.
+
+**Plugins that crash onezan** (`known_plugins.rs`). Plugins run in our process, so one that
+crashes while it is scanned, loaded or opens its editor takes onezan down, and would again at
+every start (the remembered instrument is loaded first). Around each of these, the bundle and
+what is being done are written to `plugins.busy` in the data folder, and removed after. A note
+still there at the next start (taken in once per run, before anything is scanned or loaded) is
+recorded in `plugins.json` with the bundle's fingerprint. From then on that bundle is skipped:
+one that crashed while it was scanned is not scanned (the instruments window lists it under
+"Skipped", with "Try again"); one that crashed later is still listed, greyed out, but is never
+picked automatically nor restored as the one used last time (the report says why). Asking for it
+(a click in the window, or a name or path on the command line) tries it again; so does an update
+(a new fingerprint). Not covered: a crash while it plays (audio thread) or later in its editor.
+Two onezans scanning at the same moment could take each other's note for a crash.
+
+**Scan cache.** `plugins.json` also keeps what each bundle held (name, vendor, class id,
+sub-categories) with its fingerprint, so a start loads only new or updated bundles. Bundles that
+fail to load are not kept (they are tried again at each scan: a missing library may have been
+installed). A file from another version (`version`) is scanned afresh, keeping its crashes; a
+damaged file is started afresh. The window keeps its size (the new editor is fitted into it).
 
 **Favorites.** Each row has a star (☆/★). Starred instruments (the built-in piano too) are listed
 first, under "Favorites", then "All instruments" with the rest. The class ids are kept in
@@ -643,9 +665,10 @@ unwrap/expect/panic/indexing in tests. `cargo clippy --all-targets` is clean on 
 - Live MIDI is stamped with `Instant::now()` when midir's callback runs, not with the driver's
   timestamp (midir's is on another clock, and differs per platform). Good to well under 1 ms.
 - `restartComponent` and `performEdit` from the plugin are ignored.
-- Plugins run in our own process, so a plugin crash takes the app down.
+- Plugins run in our own process, so a plugin crash takes the app down. One that crashes while
+  it is scanned, loaded or opens its editor is skipped at the next start (see "Plugins that
+  crash onezan"); a crash while it plays is not caught.
 - macOS module loading is not implemented (not a target).
-- Scanning loads every bundle in-process, with no cache.
 
 ## Reference code (consulted, not dependencies)
 

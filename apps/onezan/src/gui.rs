@@ -156,7 +156,7 @@ struct App {
     /// Which of the windows of their own are open.
     open: OpenWindows,
     /// The installed instruments, scanned when that window first opens (and on "Rescan").
-    instruments: Option<Vec<PluginInfo>>,
+    instruments: Option<crate::known_plugins::Scan>,
     /// The starred instruments (class ids, in the order starred); listed first in that window.
     favorite_instruments: Vec<String>,
     /// The starred scales (by name, in the order starred); listed first in the scales window.
@@ -664,16 +664,17 @@ impl App {
 
     /// The installed instruments, in a window of their own: click one to switch to it.
     fn instruments_window(&mut self, ctx: &egui::Context) {
-        let list = self.instruments.get_or_insert_with(|| {
-            crate::plugins::installed()
-                .into_iter()
-                .filter(PluginInfo::is_instrument)
-                .collect()
+        let scan = self.instruments.get_or_insert_with(|| {
+            let mut scan = crate::plugins::installed();
+            scan.plugins.retain(PluginInfo::is_instrument);
+            scan
         });
+        let list = &scan.plugins;
         let current = self.session.as_ref().map(|s| s.instrument().id().to_owned());
         let note = self.instrument_note.clone();
         let builder = window("onezan instruments").with_inner_size([440.0, 420.0]);
         let (mut pick, mut rescan, mut toggle_star) = (None, false, None::<String>);
+        let mut retry = None::<std::path::PathBuf>;
         let favorites = &self.favorite_instruments;
         let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("instruments"), builder, |ui, _| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -698,30 +699,16 @@ impl App {
                     ui.label(format!("No VST3 instruments found in:\n{}", dirs.join("\n")));
                     ui.separator();
                 }
-                // The built-in piano first, then the plugins; starred ones in a group above.
-                let mut rows: Vec<(String, String, String)> = Vec::new();
-                if crate::piano::available() {
-                    rows.push((
-                        onezan_engine::BUILT_IN_PIANO.to_owned(),
-                        format!("{}   FreePats Upright Piano KW", crate::piano::NAME),
-                        "Built into onezan: a Kawai upright piano (public domain)".to_owned(),
-                    ));
-                }
-                rows.extend(list.iter().map(|p| {
-                    (
-                        p.class_id.clone(),
-                        format!("{}   {}", p.name, p.vendor),
-                        p.bundle.display().to_string(),
-                    )
-                }));
+                // Starred ones in a group above.
+                let rows = instrument_rows(scan);
                 let (starred, rest): (Vec<_>, Vec<_>) = rows.iter().partition(|(id, ..)| favorites.contains(id));
-                let mut row = |ui: &mut egui::Ui, (id, text, hover): &(String, String, String)| {
+                let mut row = |ui: &mut egui::Ui, (id, text, hover): &(String, RichText, String)| {
                     ui.horizontal(|ui| {
                         if star(ui, favorites.contains(id)) {
                             toggle_star = Some(id.clone());
                         }
                         let selected = current.as_deref() == Some(id.as_str());
-                        let r = ui.selectable_label(selected, text).on_hover_text(hover);
+                        let r = ui.selectable_label(selected, text.clone()).on_hover_text(hover);
                         if r.clicked() && !selected {
                             pick = Some(id.clone());
                         }
@@ -739,6 +726,7 @@ impl App {
                     for r in &rest {
                         row(ui, r);
                     }
+                    skipped_bundles(ui, &scan.crashed, &mut retry);
                 });
             });
             ui.ctx().input(|i| i.viewport().close_requested())
@@ -746,11 +734,17 @@ impl App {
         if let Some(id) = toggle_star {
             toggle_favorite(&mut self.favorite_instruments, &id);
         }
+        if let Some(bundle) = retry {
+            crate::known_plugins::forgive(&bundle);
+            rescan = true;
+        }
         if rescan {
             self.instruments = None;
         }
         if let Some(id) = pick {
             self.switch_instrument(ctx, &id);
+            // A plugin that crashed before and loads now is no longer marked.
+            self.instruments = None;
         }
         if close {
             self.open.instruments = false;
@@ -828,6 +822,11 @@ impl App {
             h: to_u32(px(r.height())),
         };
         if let Some(editor) = self.editor.take() {
+            let _busy = self
+                .session
+                .as_ref()
+                .and_then(|s| s.instrument().plugin())
+                .map(|p| crate::known_plugins::guard(p.bundle(), crate::known_plugins::Activity::OpeningEditor));
             match window_id(frame).and_then(|parent| Embedded::new(editor, parent, area)) {
                 Ok(e) => *self.embedded.borrow_mut() = Some(e),
                 Err(why) => {
@@ -1513,12 +1512,80 @@ fn start_session(
     }
 }
 
+/// The rows of the instruments window: (id, text, hover). The built-in piano first, then the
+/// plugins; one that crashed onezan is greyed out, and clicking it tries it again.
+fn instrument_rows(scan: &crate::known_plugins::Scan) -> Vec<(String, RichText, String)> {
+    let mut rows = Vec::new();
+    if crate::piano::available() {
+        rows.push((
+            onezan_engine::BUILT_IN_PIANO.to_owned(),
+            RichText::new(format!("{}   FreePats Upright Piano KW", crate::piano::NAME)),
+            "Built into onezan: a Kawai upright piano (public domain)".to_owned(),
+        ));
+    }
+    rows.extend(scan.plugins.iter().map(|p| {
+        let text = format!("{}   {}", p.name, p.vendor);
+        let path = p.bundle.display();
+        match scan.crash(&p.bundle) {
+            None => (p.class_id.clone(), RichText::new(text), path.to_string()),
+            Some(during) => (
+                p.class_id.clone(),
+                RichText::new(format!("{text}   (crashed onezan)")).weak(),
+                format!(
+                    "{path}\nIt crashed onezan {} last time, so it is not loaded by itself. Click to try it again.",
+                    during.describe()
+                ),
+            ),
+        }
+    }));
+    rows
+}
+
+/// Bundles that crashed onezan while they were scanned (not even their names are known), each
+/// with a button that sets `retry` to it.
+fn skipped_bundles(
+    ui: &mut egui::Ui,
+    crashed: &[(std::path::PathBuf, crate::known_plugins::Activity)],
+    retry: &mut Option<std::path::PathBuf>,
+) {
+    let skipped: Vec<_> = crashed
+        .iter()
+        .filter(|(_, during)| *during == crate::known_plugins::Activity::Scanning)
+        .collect();
+    if skipped.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.label(RichText::new("Skipped").strong())
+        .on_hover_text("These crashed onezan while it looked at them, so they are left out");
+    for (bundle, _) in skipped {
+        ui.horizontal(|ui| {
+            let name = bundle.file_name().map_or_default(|n| n.to_string_lossy().into_owned());
+            ui.label(RichText::new(name).weak())
+                .on_hover_text(format!("{}\nIt crashed onezan while it was scanned.", bundle.display()));
+            if ui
+                .small_button("Try again")
+                .on_hover_text(
+                    "Look at it again now. If it crashes onezan again, it is skipped again at the next start.",
+                )
+                .clicked()
+            {
+                *retry = Some(bundle.clone());
+            }
+        });
+    }
+}
+
 /// The instrument's own editor, to embed at the next frame; or why there is none.
 fn make_editor(ctx: &egui::Context, session: &Session) -> (Option<Editor>, Option<String>) {
     let Some(plugin) = session.instrument().plugin() else {
         return (None, None);
     };
-    match plugin.editor() {
+    let editor = {
+        let _busy = crate::known_plugins::guard(plugin.bundle(), crate::known_plugins::Activity::OpeningEditor);
+        plugin.editor()
+    };
+    match editor {
         Ok(e) => {
             let repaint = ctx.clone();
             e.set_waker(move || repaint.request_repaint());

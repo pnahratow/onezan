@@ -76,25 +76,47 @@ pub fn find_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
 /// logged and skipped. Loading runs plugin code in this process.
 #[must_use]
 pub fn scan(bundles: &[PathBuf]) -> Vec<PluginInfo> {
-    let mut out = Vec::new();
-    for b in bundles {
-        match Module::load(b) {
-            Ok(m) => {
-                for c in m.classes() {
-                    if c.category != "Audio Module Class" {
-                        continue;
-                    }
-                    out.push(PluginInfo {
-                        bundle: b.clone(),
-                        name: c.name,
-                        vendor: c.vendor,
-                        class_id: crate::util::class_id_string(&c.cid),
-                        sub_categories: c.sub_categories,
-                    });
-                }
-            }
-            Err(e) => log::warn!("{e}"),
-        }
-    }
-    out
+    bundles
+        .iter()
+        .flat_map(|b| {
+            scan_bundle(b).unwrap_or_else(|e| {
+                log::warn!("{e}");
+                Vec::new()
+            })
+        })
+        .collect()
+}
+
+/// Loads one bundle and lists its audio processor classes. Runs plugin code in this process.
+///
+/// # Errors
+///
+/// When the bundle cannot be loaded.
+pub fn scan_bundle(bundle: &Path) -> crate::Result<Vec<PluginInfo>> {
+    let m = Module::load(bundle)?;
+    Ok(m.classes()
+        .into_iter()
+        .filter(|c| c.category == "Audio Module Class")
+        .map(|c| PluginInfo {
+            bundle: bundle.to_path_buf(),
+            name: c.name,
+            vendor: c.vendor,
+            class_id: crate::util::class_id_string(&c.cid),
+            sub_categories: c.sub_categories,
+        })
+        .collect())
+}
+
+/// What changes when a bundle is updated: its binary's size and modification time, without
+/// loading it. `None` when the bundle has no binary for this platform.
+#[must_use]
+pub fn fingerprint(bundle: &Path) -> Option<String> {
+    let binary = crate::module::bundle_binary(bundle)?;
+    let meta = std::fs::metadata(binary).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Some(format!("{} {modified}", meta.len()))
 }

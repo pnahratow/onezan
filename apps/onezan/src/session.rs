@@ -58,7 +58,7 @@ pub fn port_name(port: &str) -> &str {
 /// automatic choice (see [`load`]). Then a plugin's sound from last time.
 fn load_instrument(opts: &Options) -> Result<(Chosen<Instrument>, String)> {
     let mut loaded = choose(
-        &mut Installed,
+        &mut Installed::default(),
         opts.plugin.as_deref(),
         opts.remembered.plugin.as_deref(),
     )?;

@@ -1,8 +1,13 @@
 # onezan: status
 
-Last updated: 2026-11-26. Read this first when resuming.
+Last updated: 2026-11-27. Read this first when resuming.
 
 ## Where we are
+
+**Branch `polish-0.3`** (since 2026-11-27): 0.2.0 stands as released for a while. The polish work
+goes onto this long-lived branch and becomes 0.3.0 only when the app has real polish; master
+stays at 0.2.0 until then. Done there so far: plugins that crash onezan are skipped at the next
+start, and scanning is cached (ROADMAP.md, Part 1, item 2).
 
 **Scope reset on 2026-11-26.** What onezan does today is the release. No new features until it is
 out: the work now is fine-tuning, fixing rough edges and testing by hand on Linux and Windows,
@@ -33,6 +38,7 @@ postponed. What comes after the release is decided from scratch then. The old no
   from a tag (see BUILDING.md).
 
 How each part works: DESIGN.md. Hand checks and release steps: RELEASE.md. Tests: TESTING.md.
+What could come next, and how people find onezan: ROADMAP.md (a proposal, written 2026-11-27).
 
 ## Releases
 
@@ -73,7 +79,8 @@ To go through one by one: fix, or accept and say so (README or DESIGN.md).
   outputs prints "Unknown PCM" lines.
 
 **Limits by design** (probably fine for the release; decide)
-- Plugins run in onezan's own process: a plugin crash takes the app down. Scanning loads every
-  plugin in-process, with no cache.
+- Plugins run in onezan's own process: a plugin crash takes the app down. One that crashes while
+  it is scanned, loaded or opens its editor is skipped at the next start (on `polish-0.3`); a
+  crash while it plays is not caught.
 - Falling notes ignore tempo changes in a MIDI file (the first tempo is used) and show no
   fingers for songs.
