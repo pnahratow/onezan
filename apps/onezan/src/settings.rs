@@ -18,7 +18,7 @@ use std::{fs, io};
 )]
 pub struct Settings {
     pub metronome: MetronomeSettings,
-    /// The fingering shown, by name ("D major"); missing: none.
+    /// The fingering shown, by name ("D major", or "none"); missing (a first start): C major.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale: Option<String>,
     /// The window's inner size in points.
@@ -63,6 +63,9 @@ pub struct Settings {
     /// The song opened last (a MIDI file); missing: the scale falls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub song: Option<PathBuf>,
+    /// The tips above the keyboard that were done (`scale`, `metronome`, `learn_song`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tips_done: Vec<String>,
 }
 
 /// An audio output: the audio system ("ALSA", "JACK", "WASAPI") and the device's name.
@@ -249,6 +252,7 @@ mod tests {
             theme: Some("light".into()),
             piano_volume: Some(0.7),
             song: Some(PathBuf::from("/songs/Für Elise.mid")),
+            tips_done: vec!["scale".into(), "metronome".into()],
         }
     }
 
@@ -274,6 +278,7 @@ mod tests {
             theme: None,
             piano_volume: None,
             song: None,
+            tips_done: Vec::new(),
             ..sample()
         };
         assert_eq!(s, expected);

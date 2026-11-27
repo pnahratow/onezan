@@ -50,6 +50,24 @@ Check again once fixed:
 | The startup report's hints name what the window has (now "Options, Audio output" and "Options, MIDI timing") | | ✓ VM |
 | `onezan list` with nothing found: the folders are shown as paths, one per line | | ✓ VM |
 
+### The first run explains itself (branch `polish-0.3`, 2026-11-27)
+
+Start with no settings: move `settings.json` aside (`~/.config/onezan`, `%APPDATA%\onezan` on
+Windows). Wording is a first draft: change what reads wrong.
+
+| Check | Linux | Windows |
+|---|---|---|
+| First start: C major's fingering is on the keys, the bar says "Scale: C major" | | ✓ VM |
+| No keyboard: the line above the keys says "No keyboard yet: plug one in, or click the keys below to try it" | | ✓ VM |
+| Keyboard plugged in: "Play C major: right hand blue, left hand orange. Another scale: Scale"; gone after about 8 notes | | |
+| Then "Space starts the metronome, T taps the tempo"; gone once the metronome runs | | |
+| Then "Learn Song: a MIDI file falls onto the keys, to play along"; gone once Learn Song is opened | | |
+| Then the old line, "Play a chord to see its name and fingering"; the tips do not come back after a restart | | |
+| Learn Song without a song: "or drop a MIDI file here. Until then, the chosen scale falls." after "Open song…" | | ✓ VM |
+| No plugin installed: the built-in piano page suggests Surge XT | | ✓ VM |
+| "No scale" chosen in the scales window stays "none" after a restart (not C major again) | | |
+| The wording: does each tip read well? | | |
+
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
 "earlier": STATUS.md listed these for real Windows only.

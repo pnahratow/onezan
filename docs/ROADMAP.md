@@ -31,6 +31,8 @@ version. Each would make onezan a weaker copy of the subscription apps. Say so i
    *Done on `polish-0.3` (2026-11-27); waiting for a hand check.*
 3. **The first run explains itself.** With no keyboard plugged in, onezan points to Scale,
    Learn Song and the on-screen keyboard instead of showing an empty state.
+   *Done on `polish-0.3` (2026-11-27): C major on a first start, tips in the line above the
+   keyboard, a note in Learn Song without a song, Surge XT suggested without a plugin.*
 
 ### After the release: deepen the niche
 

@@ -26,6 +26,7 @@ mod report;
 mod session;
 mod settings;
 mod staff;
+mod tips;
 mod waterfall;
 
 use known_plugins::Activity;

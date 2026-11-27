@@ -13,6 +13,7 @@ use crate::keyboard::{self, KeyLook};
 use crate::progress::{Practice, Recorder};
 use crate::session::{Options, Remembered, Section, Session, port_name};
 use crate::settings::{MetronomeSettings, Settings, Store};
+use crate::tips::{self, Tip};
 use crate::waterfall::{self, Run, Song};
 use anyhow::{Result, anyhow, bail};
 use egui::{Color32, RichText};
@@ -256,6 +257,12 @@ struct App {
     piano_volume: f32,
     /// Dark (the default) or light.
     theme: egui::ThemePreference,
+    /// The tips done (see `tips`), kept in the settings.
+    tips_done: Vec<String>,
+    /// The keyboard's keys held at the last frame, to count the notes played.
+    held_before: Vec<u8>,
+    /// Notes played on the keyboard with a scale shown, for the scale's tip.
+    scale_notes: u32,
 }
 
 /// The falling notes, shown in place of the instrument's window.
@@ -373,10 +380,11 @@ impl App {
             mouse_key: None,
             mouse_pedal: MousePedal::default(),
             tap: TapTempo::default(),
+            // A first start shows C major, so the fingering is there from the start.
             preview: settings
                 .scale
                 .as_deref()
-                .and_then(Preview::from_name)
+                .map_or_else(|| Preview::from_name("C major"), Preview::from_name)
                 .unwrap_or_default(),
             last_chord: None,
             open: OpenWindows::default(),
@@ -396,11 +404,14 @@ impl App {
             options_size: None,
             store,
             window_size: settings.window,
+            tips_done: settings.tips_done.clone(),
             saved: settings,
             changed_at: None,
             notes,
             piano_volume,
             theme,
+            held_before: Vec::new(),
+            scale_notes: 0,
         }
     }
 
@@ -434,7 +445,8 @@ impl App {
             audio,
             midi_timing,
             metronome,
-            scale: (self.preview != Preview::Off).then(|| self.preview.name()),
+            // "none" too: only a first start has none saved (and shows C major).
+            scale: Some(self.preview.name()),
             window: self.window_size,
             instrument: self.session.as_ref().map_or_else(
                 || self.saved.instrument.clone(),
@@ -457,6 +469,7 @@ impl App {
             theme: theme_name(self.theme).map(str::to_owned),
             piano_volume: Some(self.piano_volume).filter(|v| (v - 1.0).abs() > f32::EPSILON),
             song: self.notes.song.as_ref().map(|(_, p)| p.clone()),
+            tips_done: self.tips_done.clone(),
         }
     }
 
@@ -980,7 +993,7 @@ impl App {
                 ui.label(
                     RichText::new(
                         "No VST3 instrument could be loaded. Install one and choose it under Instrument for \
-                         other sounds.",
+                         other sounds: a free one to start with is Surge XT.",
                     )
                     .weak(),
                 );
@@ -1030,6 +1043,40 @@ impl App {
     }
 
     /// The keys held now: on the MIDI keyboard, and with the mouse.
+    /// Marks the tips done that were (see `tips`): notes played on the keyboard with a scale
+    /// shown, the metronome started, the falling notes opened.
+    fn follow_tips(&mut self) {
+        let done = |t: Tip| self.tips_done.iter().any(|d| d == t.id());
+        if !done(Tip::Scale) && self.preview != Preview::Off {
+            let held: Vec<u8> = (0..=127u8).filter(|&k| self.keys.held(k)).collect();
+            let new = held.iter().filter(|k| !self.held_before.contains(k)).count();
+            self.scale_notes = self.scale_notes.saturating_add(u32::try_from(new).unwrap_or(u32::MAX));
+            self.held_before = held;
+            if self.scale_notes >= tips::SCALE_NOTES {
+                tips::mark(&mut self.tips_done, Tip::Scale);
+            }
+        }
+        if self.metronome().is_some_and(|m| m.is_on()) {
+            tips::mark(&mut self.tips_done, Tip::Metronome);
+        }
+        if self.notes.on {
+            tips::mark(&mut self.tips_done, Tip::LearnSong);
+        }
+    }
+
+    /// The tip for the line above the keyboard, if any.
+    fn tip(&self) -> Option<Tip> {
+        let keyboard = matches!(
+            *self.midi.lock().unwrap_or_else(PoisonError::into_inner),
+            MidiState::Connected(_)
+        );
+        tips::next(&tips::Facts {
+            keyboard,
+            scale: self.preview != Preview::Off,
+            done: &self.tips_done,
+        })
+    }
+
     fn held_keys(&self) -> Vec<u8> {
         (0..=127u8)
             .filter(|&k| self.keys.held(k) || self.mouse_key == Some(k))
@@ -1037,11 +1084,18 @@ impl App {
     }
 
     /// The line above the keyboard: the chord held (its symbol, name and notes), the notes when
-    /// they make no chord, or the last chord, dimmed, once the keys are up.
+    /// they make no chord; with the keys up, a tip for someone new (see `tips`), else the last
+    /// chord, dimmed.
     fn chord_line(&mut self, ui: &mut egui::Ui) {
         let reading = chords::read(&self.held_keys());
         if let Some(Reading::Chord(c)) = &reading {
             self.last_chord = Some(c.clone());
+        }
+        let tip = if reading.is_none() { self.tip() } else { None };
+        if let Some(t) = tip {
+            let text = t.text(&self.preview.name());
+            ui.horizontal_centered(|ui| ui.label(text));
+            return;
         }
         ui.horizontal_centered(|ui| match (&reading, &self.last_chord) {
             (Some(Reading::Chord(c)), _) => {
@@ -1446,6 +1500,8 @@ impl App {
                 .clicked();
             if let Some(note) = &self.notes.song_note {
                 ui.label(RichText::new(note).color(Color32::from_rgb(239, 68, 68)));
+            } else if self.notes.song.is_none() {
+                ui.label(RichText::new("or drop a MIDI file here. Until then, the chosen scale falls.").weak());
             }
             if let Some(r) = &self.notes.run {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2339,6 +2395,7 @@ impl eframe::App for App {
         if !self.fitted {
             self.fit_window(ctx);
         }
+        self.follow_tips();
         self.keep_settings(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             // The editor goes while its window is still there.

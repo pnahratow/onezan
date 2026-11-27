@@ -70,8 +70,11 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   embed.rs              the child window holding the plugin's editor (X11 on Linux, HWND on
                         Windows); fitting it in
   keyboard.rs           the on-screen keyboard widget: scale tint, velocity meter, fingering badges
-  settings.rs           settings.json (config folder): tempo, click, scale, window size, the
-                        instrument and keyboard used last time; data/config folder paths
+  settings.rs           settings.json (config folder): tempo, click, scale (missing: C major, a
+                        first start), window size, the instrument and keyboard used last time,
+                        the tips done; data/config folder paths
+  tips.rs               the line above the keyboard as a guide: the next tip not yet done (no
+                        keyboard; play the scale; the metronome; Learn Song), one at a time
   instrument_state.rs   the instrument's sound (plugin state) per plugin, saved on quit
   progress.rs           practice history: every note with its scale, in SQLite; practice time
   chords.rs             chord names (root, type, inversion, spelling) and a fingering for the held
