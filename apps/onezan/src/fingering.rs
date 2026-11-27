@@ -319,6 +319,128 @@ fn table(kind: Kind, root: u8) -> &'static Fingering {
     keys.get(usize::from(root)).unwrap_or(&C_SHAPE)
 }
 
+/// Which hands play a scale exercise, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Hands {
+    /// Both hands in the same direction, an octave apart (the left hand lower).
+    #[default]
+    Together,
+    Right,
+    Left,
+    /// From the key-note, both thumbs on it, the hands moving apart and back.
+    Contrary,
+}
+
+impl Hands {
+    pub const ALL: [Self; 4] = [Self::Together, Self::Right, Self::Left, Self::Contrary];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Together => "hands together",
+            Self::Right => "right hand",
+            Self::Left => "left hand",
+            Self::Contrary => "contrary motion",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|h| h.name() == name)
+    }
+}
+
+/// How a scale is practised: which hands, in what motion, over how many octaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exercise {
+    pub hands: Hands,
+    pub octaves: u8,
+}
+
+impl Default for Exercise {
+    fn default() -> Self {
+        Self {
+            hands: Hands::Together,
+            octaves: 2,
+        }
+    }
+}
+
+/// One hand's part of an exercise: it covers `octaves` from the root at `low` (a MIDI key), and
+/// goes `first` that way from its starting root, then back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Part {
+    pub hand: Hand,
+    pub low: u8,
+    pub first: Direction,
+}
+
+/// The keys a part may use: an 88-key piano, A0 to C8.
+const PIANO: std::ops::RangeInclusive<u8> = 21..=108;
+
+impl Exercise {
+    /// The most octaves; contrary motion goes up to 2 (both hands spread from the middle).
+    pub const MAX_OCTAVES: u8 = 4;
+
+    /// The octaves played: 1 to [`Self::MAX_OCTAVES`], at most 2 in contrary motion.
+    pub fn octaves(self) -> u8 {
+        let max = if self.hands == Hands::Contrary {
+            2
+        } else {
+            Self::MAX_OCTAVES
+        };
+        self.octaves.clamp(1, max)
+    }
+
+    /// Each hand's part, placed around middle C: the right hand from the root nearest middle C
+    /// (the left hand an octave below it, or ending on it alone); contrary motion from that root
+    /// in both hands. Moved by whole octaves to stay on an 88-key piano.
+    pub fn parts(self, s: Scale) -> Vec<Part> {
+        let n = self.octaves();
+        let span = n.saturating_mul(12);
+        let root = s.hand_roots().1;
+        let part = |hand, low, first| Part { hand, low, first };
+        let mut parts = match self.hands {
+            Hands::Together => vec![
+                part(Hand::Left, root.saturating_sub(12), Direction::Up),
+                part(Hand::Right, root, Direction::Up),
+            ],
+            Hands::Right => vec![part(Hand::Right, root, Direction::Up)],
+            Hands::Left => vec![part(Hand::Left, root.saturating_sub(span), Direction::Up)],
+            Hands::Contrary => vec![
+                part(Hand::Left, root.saturating_sub(span), Direction::Down),
+                part(Hand::Right, root, Direction::Up),
+            ],
+        };
+        let lowest = parts.iter().map(|p| p.low).min().unwrap_or(root);
+        let highest = parts.iter().map(|p| p.low.saturating_add(span)).max().unwrap_or(root);
+        // Whole octaves down (over the top) or up (under the bottom), in keys.
+        let octaves_in = |over: u8| over.div_ceil(12).saturating_mul(12);
+        let down = octaves_in(highest.saturating_sub(*PIANO.end()));
+        let up = octaves_in(PIANO.start().saturating_sub(lowest));
+        for p in &mut parts {
+            p.low = p.low.saturating_sub(down).saturating_add(up);
+        }
+        parts
+    }
+
+    /// Each part's notes in the order played, as (hand, key, finger): from its starting root
+    /// `first` way over the octaves and back, the turning note once.
+    pub fn lines(self, s: Scale) -> Vec<(Hand, Vec<(u8, u8)>)> {
+        let n = self.octaves();
+        self.parts(s)
+            .into_iter()
+            .map(|p| {
+                let up = s.notes(p.hand, p.low, n, Direction::Up);
+                let down = s.notes(p.hand, p.low, n, Direction::Down);
+                let line: Vec<(u8, u8)> = match p.first {
+                    Direction::Up => up.iter().chain(down.iter().rev().skip(1)).copied().collect(),
+                    Direction::Down => down.iter().rev().chain(up.iter().skip(1)).copied().collect(),
+                };
+                (p.hand, line)
+            })
+            .collect()
+    }
+}
+
 /// Which fingering is shown on the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preview {
@@ -347,8 +469,9 @@ impl Preview {
         }
     }
 
-    /// What the keyboard shows.
-    pub fn shown(self) -> Shown {
+    /// What the keyboard shows for `exercise`: each hand's fingering going out from its start
+    /// (up, or down for the left hand in contrary motion).
+    pub fn shown(self, exercise: Exercise) -> Shown {
         let mut shown = Shown {
             left: [None; 128],
             right: [None; 128],
@@ -356,12 +479,12 @@ impl Preview {
         };
         if let Self::Scale(s) = self {
             shown.scale = Some(s);
-            let (left_root, right_root) = s.hand_roots();
-            for (hand, from, slots) in [
-                (Hand::Left, left_root, &mut shown.left),
-                (Hand::Right, right_root, &mut shown.right),
-            ] {
-                for (key, finger) in s.notes(hand, from, 2, Direction::Up) {
+            for p in exercise.parts(s) {
+                let slots = match p.hand {
+                    Hand::Left => &mut shown.left,
+                    Hand::Right => &mut shown.right,
+                };
+                for (key, finger) in s.notes(p.hand, p.low, exercise.octaves(), p.first) {
                     if let Some(slot) = slots.get_mut(usize::from(key)) {
                         *slot = Some(finger);
                     }
@@ -792,25 +915,99 @@ mod tests {
         }
     }
 
-    #[test]
-    fn c_major_hands_meet_on_middle_c() {
-        let shown = Preview::Scale(scale(M, 0)).shown();
-        assert_eq!(shown.fingers(60), (Some(1), Some(1)));
-        assert_eq!(shown.fingers(36), (Some(5), None));
-        assert_eq!(shown.fingers(84), (None, Some(5)));
-        assert_eq!(shown.fingers(65), (None, Some(1)));
-        assert_eq!(shown.fingers(61), (None, None));
-        assert!(!shown.in_scale(61));
-        assert_eq!(shown.keys().min(), Some(36));
-        assert_eq!(shown.keys().max(), Some(84));
+    fn ex(hands: Hands, octaves: u8) -> Exercise {
+        Exercise { hands, octaves }
     }
 
     #[test]
-    fn other_keys_meet_on_the_root_nearest_middle_c() {
-        let g = Preview::Scale(scale(M, 7)).shown();
+    fn hands_together_play_an_octave_apart_from_the_root_nearest_middle_c() {
+        let shown = Preview::Scale(scale(M, 0)).shown(Exercise::default());
+        // Left hand C3 to C5, right hand C4 to C6.
+        assert_eq!(shown.fingers(48), (Some(5), None));
+        assert_eq!(shown.fingers(60), (Some(1), Some(1)));
+        assert_eq!(shown.fingers(72), (Some(1), Some(1)));
+        assert_eq!(shown.fingers(84), (None, Some(5)));
+        assert_eq!(shown.fingers(61), (None, None));
+        assert!(!shown.in_scale(61));
+        assert_eq!((shown.keys().min(), shown.keys().max()), (Some(48), Some(84)));
+        // G major: from the G below middle C.
+        let g = Preview::Scale(scale(M, 7)).shown(Exercise::default());
         assert_eq!(g.fingers(55), (Some(1), Some(1)));
-        assert_eq!((g.keys().min(), g.keys().max()), (Some(31), Some(79)));
-        let f = Preview::Scale(scale(M, 5)).shown();
-        assert_eq!(f.fingers(65), (Some(1), Some(1)));
+        assert_eq!((g.keys().min(), g.keys().max()), (Some(43), Some(79)));
+    }
+
+    #[test]
+    fn contrary_motion_starts_on_one_key_note_with_both_thumbs() {
+        let c = scale(M, 0);
+        let shown = Preview::Scale(c).shown(ex(Hands::Contrary, 2));
+        assert_eq!(shown.fingers(60), (Some(1), Some(1)));
+        assert_eq!(shown.fingers(36), (Some(5), None));
+        assert_eq!(shown.fingers(84), (None, Some(5)));
+        let lines = ex(Hands::Contrary, 2).lines(c);
+        let line = |hand| lines.iter().find(|(h, _)| *h == hand).map(|(_, l)| l.clone()).unwrap();
+        let (left, right) = (line(Hand::Left), line(Hand::Right));
+        assert_eq!(left.iter().take(3).map(|n| n.0).collect::<Vec<_>>(), [60, 59, 57]);
+        assert_eq!(right.iter().take(3).map(|n| n.0).collect::<Vec<_>>(), [60, 62, 64]);
+        // Out and back, the far note once: 2 × 14 + 1 notes, ending where they began.
+        assert_eq!((left.len(), right.len()), (29, 29));
+        assert_eq!(
+            (left.last().map(|n| n.0), right.last().map(|n| n.0)),
+            (Some(60), Some(60))
+        );
+        // At most two octaves.
+        assert_eq!(ex(Hands::Contrary, 4).octaves(), 2);
+    }
+
+    #[test]
+    fn one_hand_alone_plays_from_or_to_middle_c() {
+        let c = scale(M, 0);
+        let parts = |hands, n| ex(hands, n).parts(c);
+        assert_eq!(
+            parts(Hands::Right, 2),
+            [Part {
+                hand: Hand::Right,
+                low: 60,
+                first: Direction::Up
+            }]
+        );
+        assert_eq!(
+            parts(Hands::Left, 2),
+            [Part {
+                hand: Hand::Left,
+                low: 36,
+                first: Direction::Up
+            }]
+        );
+    }
+
+    #[test]
+    fn exercises_stay_on_an_88_key_piano() {
+        let lows = |e: Exercise, s: Scale| e.parts(s).iter().map(|p| p.low).collect::<Vec<_>>();
+        // Four octaves of C fit as they are (the right hand ends on C8).
+        assert_eq!(lows(ex(Hands::Together, 4), scale(M, 0)), [48, 60]);
+        // F#: an octave lower, so the right hand ends on F#7, not above the piano.
+        assert_eq!(lows(ex(Hands::Together, 4), scale(M, 6)), [42, 54]);
+        // The left hand alone over four octaves: an octave higher, from C1.
+        assert_eq!(lows(ex(Hands::Left, 4), scale(M, 0)), [24]);
+        for e in [
+            ex(Hands::Together, 4),
+            ex(Hands::Right, 4),
+            ex(Hands::Left, 4),
+            ex(Hands::Contrary, 2),
+        ] {
+            for s in Scale::all() {
+                for (_, line) in e.lines(s) {
+                    assert!(line.iter().all(|(k, _)| PIANO.contains(k)), "{} {e:?}", s.name());
+                    assert_eq!(line.len(), usize::from(e.octaves()) * 14 + 1, "{} {e:?}", s.name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hands_have_names_that_read_back() {
+        for h in Hands::ALL {
+            assert_eq!(Hands::from_name(h.name()), Some(h));
+        }
     }
 }

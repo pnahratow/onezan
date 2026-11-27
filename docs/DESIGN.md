@@ -80,7 +80,9 @@ apps/onezan/            no command (or `gui`): the window; CLI: list [--all] | m
   chords.rs             chord names (root, type, inversion, spelling) and a fingering for the held
                         keys; shown in the line above the keyboard
   fingering.rs          the fingering table: major, natural/harmonic/melodic minor, 12 keys, both
-                        hands, any octaves; the preview the window shows
+                        hands, any octaves; the preview the window shows; scale exercises
+                        (Exercise: hands together an octave apart, one hand, contrary motion
+                        from the key-note; 1 to 4 octaves, contrary at most 2; kept on 88 keys)
   waterfall.rs          falling notes: Song (a scale, or a MIDI file via
                         midly), Run (play along with the metronome, or wait), drawing
   staff.rs              music notation with Bravura (assets/fonts/, SIL OFL 1.1, embedded

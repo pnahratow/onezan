@@ -68,6 +68,21 @@ Windows). Wording is a first draft: change what reads wrong.
 | "No scale" chosen in the scales window stays "none" after a restart (not C major again) | | |
 | The wording: does each tip read well? | | |
 
+### Scale exercises, step 1: hands and octaves (branch `polish-0.3`, 2026-11-27)
+
+In Learn Song with no song open, two choices next to "Play the notes": the hands (together,
+right, left, contrary motion) and the octaves (1 to 4; contrary at most 2). The keys show the
+fingering of the choice, and that is what falls.
+
+| Check | Linux | Windows |
+|---|---|---|
+| Hands together: the hands an octave apart (C major: left C3 to C5, right C4 to C6) | | ✓ VM (shown) |
+| Contrary motion: both thumbs on the key-note, the hands apart and back; playing along counts both hands | | ✓ VM (shown) |
+| Right / left hand alone, 1 to 4 octaves: falls as shown, playable | | |
+| 4 octaves on a 49-key keyboard: the on-screen keyboard widens; what can't be played is clear | | |
+| In contrary motion the two hands' first falling note is on one key: only one shows (drawn on top of each other). Fine, or mark it? | | |
+| The choices are remembered after a restart | | |
+
 ### From before the branch (listed in STATUS.md until 2026-11-27)
 
 "earlier": STATUS.md listed these for real Windows only.

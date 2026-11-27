@@ -8,7 +8,7 @@
 use crate::chords::{self, Chord, Reading};
 use crate::embed::{Embedded, PixelRect};
 use crate::fingering::Hand;
-use crate::fingering::{Preview, Scale, Shown};
+use crate::fingering::{Exercise, Hands, Preview, Scale, Shown};
 use crate::keyboard::{self, KeyLook};
 use crate::progress::{Practice, Recorder};
 use crate::session::{Options, Remembered, Section, Session, port_name};
@@ -263,6 +263,8 @@ struct App {
     held_before: Vec<u8>,
     /// Notes played on the keyboard with a scale shown, for the scale's tip.
     scale_notes: u32,
+    /// How the scale is practised (hands, octaves): what falls and what the keys show.
+    exercise: Exercise,
 }
 
 /// The falling notes, shown in place of the instrument's window.
@@ -405,6 +407,14 @@ impl App {
             store,
             window_size: settings.window,
             tips_done: settings.tips_done.clone(),
+            exercise: Exercise {
+                hands: settings
+                    .exercise_hands
+                    .as_deref()
+                    .and_then(Hands::from_name)
+                    .unwrap_or_default(),
+                octaves: settings.exercise_octaves.unwrap_or_else(|| Exercise::default().octaves),
+            },
             saved: settings,
             changed_at: None,
             notes,
@@ -470,6 +480,8 @@ impl App {
             piano_volume: Some(self.piano_volume).filter(|v| (v - 1.0).abs() > f32::EPSILON),
             song: self.notes.song.as_ref().map(|(_, p)| p.clone()),
             tips_done: self.tips_done.clone(),
+            exercise_hands: (self.exercise.hands != Hands::default()).then(|| self.exercise.hands.name().to_owned()),
+            exercise_octaves: (self.exercise.octaves != Exercise::default().octaves).then_some(self.exercise.octaves),
         }
     }
 
@@ -1024,7 +1036,7 @@ impl App {
         }
         // The fingering shown widens it too, but only while it is shown; so does a song falling.
         let song = self.notes.song.as_ref().filter(|_| self.notes.on).map(|(s, _)| s);
-        let shown = self.preview.shown();
+        let shown = self.preview.shown(self.exercise);
         let mut range = shown.keys().fold(self.range.clone(), |r, key| keyboard::widen(&r, key));
         for n in song.map_or(&[][..], |s| s.notes.as_slice()) {
             range = keyboard::widen(&range, n.key);
@@ -1167,7 +1179,7 @@ impl App {
     fn falling_song(&self) -> Option<Cow<'_, Song>> {
         match (&self.notes.song, self.preview) {
             (Some((song, _)), _) => Some(Cow::Borrowed(song)),
-            (None, Preview::Scale(s)) => Some(Cow::Owned(Song::scale(s))),
+            (None, Preview::Scale(s)) => Some(Cow::Owned(Song::scale(s, self.exercise))),
             (None, Preview::Off) => None,
         }
     }
@@ -1176,7 +1188,7 @@ impl App {
     fn falling_name(&self) -> Option<Cow<'_, str>> {
         match (&self.notes.song, self.preview) {
             (Some((song, _)), _) => Some(Cow::Borrowed(song.name.as_str())),
-            (None, Preview::Scale(s)) => Some(Cow::Owned(s.name())),
+            (None, Preview::Scale(s)) => Some(Cow::Owned(waterfall::exercise_name(s, self.exercise))),
             (None, Preview::Off) => None,
         }
     }
@@ -1475,6 +1487,14 @@ impl App {
                 }
             }
             ui.separator();
+            if self.notes.song.is_none() && self.preview != Preview::Off {
+                let before = self.exercise;
+                exercise_controls(ui, &mut self.exercise);
+                if self.exercise != before {
+                    self.stop_run();
+                }
+                ui.separator();
+            }
             if let Some((song, path)) = &self.notes.song {
                 ui.label(RichText::new(format!("Song: {}", song.name)).strong())
                     .on_hover_text(path.display().to_string());
@@ -1853,6 +1873,47 @@ impl TapTempo {
 /// The bar's switch between the instrument and the falling notes: filled in the accent colour,
 /// with an icon for where it leads (falling notes, or an instrument's sliders), so it stands
 /// out from the other buttons.
+/// The scale exercise's choices: which hands (and how), and how many octaves.
+fn exercise_controls(ui: &mut egui::Ui, exercise: &mut Exercise) {
+    egui::ComboBox::from_id_salt("exercise hands")
+        .selected_text(exercise.hands.name())
+        .show_ui(ui, |ui| {
+            for h in Hands::ALL {
+                ui.selectable_value(&mut exercise.hands, h, h.name());
+            }
+        })
+        .response
+        .on_hover_text(
+            "How the scale is played: hands together (an octave apart), one hand alone, or in contrary \
+             motion (both thumbs on the key-note, the hands moving apart and back)",
+        );
+    let n = exercise.octaves();
+    egui::ComboBox::from_id_salt("exercise octaves")
+        .selected_text(if n == 1 {
+            "1 octave".to_owned()
+        } else {
+            format!("{n} octaves")
+        })
+        .show_ui(ui, |ui| {
+            let max = if exercise.hands == Hands::Contrary {
+                2
+            } else {
+                Exercise::MAX_OCTAVES
+            };
+            for o in 1..=max {
+                let text = if o == 1 {
+                    "1 octave".to_owned()
+                } else {
+                    format!("{o} octaves")
+                };
+                ui.selectable_value(&mut exercise.octaves, o, text);
+            }
+        })
+        .response
+        .on_hover_text("How far the scale goes up and back down (contrary motion: at most 2)");
+    exercise.octaves = exercise.octaves();
+}
+
 fn mode_button(ui: &mut egui::Ui, notes_on: bool, label: &str) -> egui::Response {
     const ACCENT: Color32 = Color32::from_rgb(124, 58, 237);
     const ACCENT_HOVER: Color32 = Color32::from_rgb(139, 92, 246);
@@ -2586,7 +2647,7 @@ mod tests {
     }
 
     fn c_major() -> Shown {
-        Preview::from_name("C major").unwrap().shown()
+        Preview::from_name("C major").unwrap().shown(Exercise::default())
     }
 
     #[test]

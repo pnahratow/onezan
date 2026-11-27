@@ -66,6 +66,12 @@ pub struct Settings {
     /// The tips above the keyboard that were done (`scale`, `metronome`, `learn_song`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tips_done: Vec<String>,
+    /// The scale exercise's hands ("right hand", "contrary motion", ...); missing: together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exercise_hands: Option<String>,
+    /// The scale exercise's octaves (1 to 4); missing: 2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exercise_octaves: Option<u8>,
 }
 
 /// An audio output: the audio system ("ALSA", "JACK", "WASAPI") and the device's name.
@@ -253,6 +259,8 @@ mod tests {
             piano_volume: Some(0.7),
             song: Some(PathBuf::from("/songs/Für Elise.mid")),
             tips_done: vec!["scale".into(), "metronome".into()],
+            exercise_hands: Some("contrary motion".into()),
+            exercise_octaves: Some(1),
         }
     }
 
@@ -279,6 +287,8 @@ mod tests {
             piano_volume: None,
             song: None,
             tips_done: Vec::new(),
+            exercise_hands: None,
+            exercise_octaves: None,
             ..sample()
         };
         assert_eq!(s, expected);

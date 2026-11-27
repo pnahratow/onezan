@@ -8,7 +8,7 @@
 //!   waiting (the notes stop at the keys until they are played).
 //! - [`draw`]: the falling notes over the keyboard's key columns.
 
-use crate::fingering::{Direction, Hand, Kind, Scale};
+use crate::fingering::{Exercise, Hand, Kind, Scale};
 use crate::keyboard::{LEFT_HAND, RIGHT_HAND, is_black};
 use egui::{Align2, Color32, FontId, Rect, Stroke, StrokeKind, pos2};
 use std::collections::BTreeMap;
@@ -103,19 +103,13 @@ impl Key {
 }
 
 impl Song {
-    /// Two octaves hands together, up and down, a note per beat, with its fingering; the hands
-    /// meet on the root nearest middle C, as the keyboard shows it.
-    pub fn scale(s: Scale) -> Self {
-        let (left_root, right_root) = s.hand_roots();
+    /// The scale played as `exercise` (see [`Exercise::lines`]), a note per beat, with its
+    /// fingering, as the keyboard shows it.
+    pub fn scale(s: Scale, exercise: Exercise) -> Self {
         let mut notes = Vec::new();
-        for (hand, root) in [(Hand::Left, left_root), (Hand::Right, right_root)] {
-            let up = s.notes(hand, root, 2, Direction::Up);
-            // Down comes highest first; its top note is the last one up, played once.
-            let down = s.notes(hand, root, 2, Direction::Down);
-            let line = up.iter().chain(down.iter().rev().skip(1));
-            let last = up.len().saturating_add(down.len()).saturating_sub(2);
-            for (i, &(key, finger)) in line.enumerate() {
-                let last = i == last;
+        for (hand, line) in exercise.lines(s) {
+            let last = line.len().saturating_sub(1);
+            for (i, (key, finger)) in line.into_iter().enumerate() {
                 notes.push(Note {
                     key,
                     hand,
@@ -123,13 +117,13 @@ impl Song {
                     velocity: 80,
                     letter: s.letter(key),
                     beat: f64::from(u32::try_from(i).unwrap_or(u32::MAX)),
-                    len: if last { 2.0 } else { 1.0 },
+                    len: if i == last { 2.0 } else { 1.0 },
                 });
             }
         }
         notes.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(a.key.cmp(&b.key)));
         Self {
-            name: s.name(),
+            name: exercise_name(s, exercise),
             notes,
             bpm: None,
             key: None,
@@ -292,6 +286,21 @@ struct Played {
     beat: f64,
     len: f64,
     velocity: u8,
+}
+
+/// "C major", or with the exercise when it is not the usual one: "C major, contrary motion,
+/// 2 octaves".
+pub fn exercise_name(s: Scale, exercise: Exercise) -> String {
+    if exercise == Exercise::default() {
+        return s.name();
+    }
+    let n = exercise.octaves();
+    let octaves = if n == 1 {
+        "1 octave".to_owned()
+    } else {
+        format!("{n} octaves")
+    };
+    format!("{}, {}, {octaves}", s.name(), exercise.hands.name())
 }
 
 /// The notes of one track (or channel) of a MIDI file.
@@ -619,14 +628,17 @@ mod tests {
     use super::*;
 
     fn c_major() -> Song {
-        Song::scale(Scale {
-            root: 0,
-            kind: Kind::Major,
-        })
+        Song::scale(
+            Scale {
+                root: 0,
+                kind: Kind::Major,
+            },
+            Exercise::default(),
+        )
     }
 
     #[test]
-    fn a_scale_goes_up_and_down_two_octaves_hands_together() {
+    fn a_scale_goes_up_and_down_two_octaves_hands_together_an_octave_apart() {
         let s = c_major();
         let right: Vec<u8> = s
             .notes
@@ -640,7 +652,7 @@ mod tests {
         assert_eq!(right.get(15), Some(&83));
         assert_eq!(right.last(), Some(&60));
         let left_first = s.notes.iter().find(|n| n.hand == Hand::Left).unwrap();
-        assert_eq!((left_first.key, left_first.beat, left_first.finger), (36, 0.0, Some(5)));
+        assert_eq!((left_first.key, left_first.beat, left_first.finger), (48, 0.0, Some(5)));
         assert!((s.end() - 30.0).abs() < 1e-9, "the last note held two beats");
     }
 
@@ -684,19 +696,19 @@ mod tests {
         let s = c_major();
         // Beat 0: both hands start; nothing ends.
         let (starts, ends) = s.between(-0.5, 0.0);
-        assert_eq!(starts, [(36, 80), (60, 80)]);
+        assert_eq!(starts, [(48, 80), (60, 80)]);
         assert_eq!(ends, [0u8; 0], "nothing ends");
         // Beat 1: the first notes end as the next ones start.
         let (starts, ends) = s.between(0.9, 1.0);
-        assert_eq!(starts, [(38, 80), (62, 80)]);
-        assert_eq!(ends, [36, 60]);
+        assert_eq!(starts, [(50, 80), (62, 80)]);
+        assert_eq!(ends, [48, 60]);
         assert_eq!(s.between(0.2, 0.8), (Vec::new(), Vec::new()));
     }
 
     #[test]
     fn notes_are_named_as_their_scale_writes_them() {
         let names = |root, kind| {
-            let s = Song::scale(Scale { root, kind });
+            let s = Song::scale(Scale { root, kind }, Exercise::default());
             let mut up: Vec<String> = s
                 .notes
                 .iter()
@@ -711,10 +723,13 @@ mod tests {
         assert_eq!(names(1, Kind::Major), "Db Eb F Gb Ab Bb C Db");
         assert_eq!(names(9, Kind::HarmonicMinor), "A B C D E F G# A");
         // Melodic minor comes down as natural minor: G, F going down from A.
-        let s = Song::scale(Scale {
-            root: 9,
-            kind: Kind::MelodicMinor,
-        });
+        let s = Song::scale(
+            Scale {
+                root: 9,
+                kind: Kind::MelodicMinor,
+            },
+            Exercise::default(),
+        );
         let right: Vec<String> = s
             .notes
             .iter()
@@ -818,8 +833,8 @@ mod tests {
         assert!(r.beat().abs() < 1e-9, "stops at the first notes");
         assert!(r.press(60, 60.0, 0.0));
         r.advance(None, 10.0, 60.0);
-        assert!(r.beat().abs() < 1e-9, "the left hand's C2 is still to play");
-        assert!(r.press(36, 60.0, 0.0));
+        assert!(r.beat().abs() < 1e-9, "the left hand's C3 is still to play");
+        assert!(r.press(48, 60.0, 0.0));
         r.advance(None, 0.5, 60.0);
         assert!((r.beat() - 0.5).abs() < 1e-9, "on again");
         assert!(r.press(62, 60.0, 0.0), "the next chord, played early");
