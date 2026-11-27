@@ -130,8 +130,8 @@ note when judging. A scale in Learn Song also starts by playing its I chord (any
 
 ### Results card and count-in (branch `polish-0.3`, 2026-11-27)
 
-The end of a run is a card: stars as the ladder rates it (3 clean, 2 near miss, 1 most notes on
-time), the notes on time and the ladder's verdict, and a gauge per measure (timing evenness,
+The end of a run is a card: five stars in step with the ladder (5 clean with every gauge good,
+4 clean: both go up; 3 near miss: stays; 2 three quarters on time; 1 half), the notes on time and the ladder's verdict, and a gauge per measure (timing evenness,
 early/late, loudness evenness, hands together) with green / yellow / red zones. A run started
 on a click (a chord played in time) counts that click as "one": four clicks of count-in either
 way. Seen drawn on the VM with a run played by mouse (few notes on time: mouse clicks are

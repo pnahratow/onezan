@@ -25,18 +25,26 @@ pub fn clean(e: &Evenness) -> bool {
     e.notes > 0 && e.played == e.notes && e.spread_ms.is_some_and(|s| s <= CLEAN_SPREAD_MS)
 }
 
-/// Stars for a run, 0 to 3, as the ladder sees it: 3 clean (up a marking), 2 a near miss
-/// (stays), 1 most notes on time, 0 fewer.
+/// The most stars a run gets.
+pub const MAX_STARS: u8 = 5;
+
+/// Stars for a run, 0 to 5, in step with the ladder: 5 clean with every gauge good (timing,
+/// early or late, loudness, hands together), 4 clean (both go up a marking), 3 a near miss
+/// (stays), 2 at least three quarters of the notes on time, 1 at least half, 0 fewer.
 pub fn stars(e: &Evenness) -> u8 {
-    let share = |part: usize| {
-        f64::from(u32::try_from(part).unwrap_or(u32::MAX)) / f64::from(u32::try_from(e.notes.max(1)).unwrap_or(1))
-    };
-    if clean(e) {
+    let share =
+        f64::from(u32::try_from(e.played).unwrap_or(u32::MAX)) / f64::from(u32::try_from(e.notes.max(1)).unwrap_or(1));
+    let all_good = || e.gauges().iter().all(|g| g.grade() == crate::waterfall::Grade::Good);
+    if clean(e) && all_good() {
+        5
+    } else if clean(e) {
+        4
+    } else if share >= NEAR_MISS {
         3
-    } else if share(e.played) >= NEAR_MISS {
+    } else if share >= 0.75 {
         2
     } else {
-        u8::from(share(e.played) >= 0.6)
+        u8::from(share >= 0.5)
     }
 }
 
@@ -120,11 +128,28 @@ mod tests {
 
     #[test]
     fn stars_follow_the_ladder() {
-        assert_eq!(stars(&run(29, 29, Some(15.0))), 3, "clean");
-        assert_eq!(stars(&run(29, 29, Some(40.0))), 2, "all on time but uneven");
-        assert_eq!(stars(&run(27, 29, Some(15.0))), 2, "a near miss");
-        assert_eq!(stars(&run(20, 29, Some(15.0))), 1);
+        assert_eq!(stars(&run(29, 29, Some(15.0))), 5, "clean, every gauge good");
+        assert_eq!(stars(&run(29, 29, Some(25.0))), 4, "clean, timing only fair");
+        let mut loud = run(29, 29, Some(15.0));
+        loud.loudness = Some(9.0);
+        assert_eq!(stars(&loud), 4, "clean, loudness only fair");
+        assert_eq!(
+            stars(&run(29, 29, Some(40.0))),
+            3,
+            "all on time but uneven: a near miss"
+        );
+        assert_eq!(stars(&run(27, 29, Some(15.0))), 3, "a near miss");
+        assert_eq!(stars(&run(23, 29, Some(15.0))), 2, "79 %");
+        assert_eq!(stars(&run(15, 29, Some(15.0))), 1, "52 %");
         assert_eq!(stars(&run(10, 29, Some(15.0))), 0);
+        // Up the ladder exactly from four stars.
+        for e in [
+            run(29, 29, Some(15.0)),
+            run(29, 29, Some(25.0)),
+            run(27, 29, Some(15.0)),
+        ] {
+            assert_eq!(stars(&e) >= 4, after(&e, 88) > 88);
+        }
     }
 
     #[test]

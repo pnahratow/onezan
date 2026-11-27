@@ -2076,11 +2076,12 @@ fn results_card(painter: &egui::Painter, area: egui::Rect, run: &Run, again: &st
         );
     };
     let mut y = card.top() + 32.0;
-    // Stars: as many lit as earned, of three (playing along; waiting has no timing to rate).
+    // Stars: as many lit as earned, of five (playing along; waiting has no timing to rate).
     if !run.wait {
         let earned = crate::ladder::stars(&e);
-        for i in 0..3u8 {
-            let x = f32::from(i).mul_add(40.0, card.center().x - 40.0);
+        let max = crate::ladder::MAX_STARS;
+        for i in 0..max {
+            let x = (f32::from(i) - f32::from(max - 1) / 2.0).mul_add(36.0, card.center().x);
             let (star, colour) = if i < earned {
                 ("★", Color32::from_rgb(250, 204, 21))
             } else {
